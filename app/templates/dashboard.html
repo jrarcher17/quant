@@ -1240,6 +1240,26 @@ function formatDateTime(isoStr) {
     return `${day} ${month} ${time}`;
 }
 
+function finiteNumber(value) {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+}
+
+function formatNumber(value, digits = 1) {
+    const num = finiteNumber(value);
+    return num === null ? '--' : num.toFixed(digits);
+}
+
+function formatRatioPercent(value) {
+    const num = finiteNumber(value);
+    return num === null ? '--' : `${(num * 100).toFixed(1)}%`;
+}
+
+function formatCount(value) {
+    const num = finiteNumber(value);
+    return num === null ? 0 : num;
+}
+
 function formatQuotePrice(price) {
     if (price === null || price === undefined) return '--';
     const value = Number(price);
@@ -1270,10 +1290,11 @@ function resultTag(result, status) {
 }
 
 function pnlDisplay(pnl) {
-    if (pnl === null || pnl === undefined) return '--';
-    const sign = pnl >= 0 ? '+' : '';
-    const color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
-    return `<span style="color: ${color}">${sign}${pnl.toFixed(1)}</span>`;
+    const num = finiteNumber(pnl);
+    if (num === null) return '--';
+    const sign = num >= 0 ? '+' : '';
+    const color = num >= 0 ? 'var(--green)' : 'var(--red)';
+    return `<span style="color: ${color}">${sign}${num.toFixed(1)}</span>`;
 }
 
 let latestQuotePrice = null;
@@ -1287,11 +1308,13 @@ function pipValueForSymbol(symbol) {
 }
 
 function livePnlDisplay(direction, entry, price, symbol) {
-    if (price === null || price === undefined || entry === null || entry === undefined) return '--';
+    const quotePrice = finiteNumber(price);
+    const entryPrice = finiteNumber(entry);
+    if (quotePrice === null || entryPrice === null) return '--';
     const pipValue = pipValueForSymbol(symbol);
     const rawPips = direction === 'BUY'
-        ? (Number(price) - Number(entry)) / pipValue
-        : (Number(entry) - Number(price)) / pipValue;
+        ? (quotePrice - entryPrice) / pipValue
+        : (entryPrice - quotePrice) / pipValue;
     const sign = rawPips >= 0 ? '+' : '';
     const color = rawPips >= 0 ? 'var(--green)' : 'var(--red)';
     return `<span style="color: ${color}">${sign}${rawPips.toFixed(1)}</span>`;
@@ -1310,17 +1333,19 @@ function updateLiveSignalPnl() {
 }
 
 function updateQuote(quote) {
-    latestQuotePrice = quote.current_price;
+    latestQuotePrice = finiteNumber(quote.current_price);
     latestQuoteSymbol = quote.symbol || latestQuoteSymbol;
 
     document.getElementById('current-price').textContent = formatQuotePrice(quote.current_price);
     document.getElementById('price-time').textContent = formatQuoteTime(quote.timestamp || quote.last_candle);
 
     const changeEl = document.getElementById('price-change');
-    if (quote.price_change !== null && quote.price_change !== undefined && quote.price_change_pct !== null && quote.price_change_pct !== undefined) {
-        const sign = quote.price_change >= 0 ? '+' : '';
-        changeEl.textContent = `${sign}${Number(quote.price_change).toFixed(3)} ${sign}${Number(quote.price_change_pct).toFixed(2)}%`;
-        changeEl.className = `quote-change ${quote.price_change >= 0 ? 'up' : 'down'}`;
+    const priceChange = finiteNumber(quote.price_change);
+    const priceChangePct = finiteNumber(quote.price_change_pct);
+    if (priceChange !== null && priceChangePct !== null) {
+        const sign = priceChange >= 0 ? '+' : '';
+        changeEl.textContent = `${sign}${priceChange.toFixed(3)} ${sign}${priceChangePct.toFixed(2)}%`;
+        changeEl.className = `quote-change ${priceChange >= 0 ? 'up' : 'down'}`;
     } else {
         changeEl.textContent = '--';
         changeEl.className = 'quote-change';
@@ -1341,13 +1366,21 @@ async function refreshPrice() {
 }
 
 async function refreshDashboard() {
+    let data;
     try {
         const resp = await fetch('/dashboard/data');
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
+        data = await resp.json();
+    } catch (err) {
+        console.error('Dashboard refresh failed:', err);
+        document.getElementById('status-dot').className = 'status-dot degraded';
+        document.getElementById('system-label').textContent = 'CONNECTION ERROR';
+        return;
+    }
 
+    try {
         // --- System ---
-        const sys = data.system;
+        const sys = data.system || {};
         const dot = document.getElementById('status-dot');
         const label = document.getElementById('system-label');
         if (sys.status === 'operational') {
@@ -1363,104 +1396,115 @@ async function refreshDashboard() {
         document.getElementById('last-candle').textContent = sys.last_candle ? formatDateTime(sys.last_candle) : 'No data yet';
 
         // --- Signal stats ---
-        const sig = data.signals;
-        document.getElementById('active-signals').textContent = sig.active;
-        document.getElementById('signals-today').textContent = `${sig.today} today`;
-        document.getElementById('total-signals').textContent = `${sig.total} total`;
-        document.getElementById('signal-count').textContent = sig.recent.length;
+        const sig = data.signals || {};
+        const recentSignals = Array.isArray(sig.recent) ? sig.recent : [];
+        document.getElementById('active-signals').textContent = formatCount(sig.active);
+        document.getElementById('signals-today').textContent = `${formatCount(sig.today)} today`;
+        document.getElementById('total-signals').textContent = `${formatCount(sig.total)} total`;
+        document.getElementById('signal-count').textContent = recentSignals.length;
 
         // --- Performance ---
-        const perf = data.performance;
-        document.getElementById('win-rate').textContent = `${perf.win_rate}%`;
-        document.getElementById('win-rate').className = `stat-value ${perf.win_rate >= 50 ? 'green' : 'red'}`;
-        document.getElementById('win-loss').textContent = `${perf.wins}W / ${perf.losses}L`;
+        const perf = data.performance || {};
+        const winRate = finiteNumber(perf.win_rate) || 0;
+        document.getElementById('win-rate').textContent = `${winRate}%`;
+        document.getElementById('win-rate').className = `stat-value ${winRate >= 50 ? 'green' : 'red'}`;
+        document.getElementById('win-loss').textContent = `${formatCount(perf.wins)}W / ${formatCount(perf.losses)}L`;
 
         const pnlEl = document.getElementById('total-pnl');
-        const pnlSign = perf.total_pnl >= 0 ? '+' : '';
-        pnlEl.textContent = `${pnlSign}${perf.total_pnl} pips`;
-        pnlEl.className = `stat-value ${perf.total_pnl >= 0 ? 'green' : 'red'}`;
+        const totalPnl = finiteNumber(perf.total_pnl) || 0;
+        const pnlSign = totalPnl >= 0 ? '+' : '';
+        pnlEl.textContent = `${pnlSign}${totalPnl} pips`;
+        pnlEl.className = `stat-value ${totalPnl >= 0 ? 'green' : 'red'}`;
 
         // --- Signals table ---
         const tbody = document.getElementById('signals-body');
         const empty = document.getElementById('signals-empty');
-        if (sig.recent.length === 0) {
+        if (recentSignals.length === 0) {
             tbody.innerHTML = '';
             empty.style.display = 'block';
         } else {
             empty.style.display = 'none';
-            tbody.innerHTML = sig.recent.map(s => `
+            tbody.innerHTML = recentSignals.map(s => {
+                const direction = s.direction || '--';
+                return `
                 <tr>
-                    <td><span class="tag ${s.direction.toLowerCase()}">${s.direction}</span></td>
-                    <td>${s.entry.toFixed(2)}</td>
-                    <td>${s.sl.toFixed(2)}</td>
-                    <td>${s.tp1.toFixed(2)}</td>
-                    <td>${s.tp2.toFixed(2)}</td>
-                    <td>${s.rr.toFixed(1)}</td>
-                    <td>${s.confidence.toFixed(0)}%</td>
+                    <td><span class="tag ${direction.toLowerCase()}">${direction}</span></td>
+                    <td>${formatNumber(s.entry, 2)}</td>
+                    <td>${formatNumber(s.sl, 2)}</td>
+                    <td>${formatNumber(s.tp1, 2)}</td>
+                    <td>${formatNumber(s.tp2, 2)}</td>
+                    <td>${formatNumber(s.rr, 1)}</td>
+                    <td>${formatNumber(s.confidence, 0)}%</td>
                     <td style="color: var(--text-secondary); font-size: 11px;">${s.strategy}</td>
                     <td>${resultTag(s.result, s.status)}</td>
                     <td
                         ${(!s.result && s.status === 'active') ? 'data-live-pnl="true"' : ''}
-                        data-direction="${s.direction}"
+                        data-direction="${direction}"
                         data-entry="${s.entry}"
                     >${(!s.result && s.status === 'active')
-                        ? livePnlDisplay(s.direction, s.entry, latestQuotePrice, latestQuoteSymbol)
+                        ? livePnlDisplay(direction, s.entry, latestQuotePrice, latestQuoteSymbol)
                         : pnlDisplay(s.pnl)}</td>
                     <td style="color: var(--text-dim); font-size: 11px;">${formatDateTime(s.created)}</td>
                 </tr>
-            `).join('');
+            `}).join('');
             updateLiveSignalPnl();
         }
 
         // --- Strategies ---
         const stratBody = document.getElementById('strategies-body');
         const stratEmpty = document.getElementById('strategies-empty');
-        document.getElementById('strategy-count').textContent = data.strategies.length;
-        if (data.strategies.length === 0) {
+        const strategies = Array.isArray(data.strategies) ? data.strategies : [];
+        document.getElementById('strategy-count').textContent = strategies.length;
+        if (strategies.length === 0) {
             stratBody.innerHTML = '';
             stratBody.appendChild(stratEmpty);
         } else {
             stratEmpty.style.display = 'none';
-            stratBody.innerHTML = data.strategies.map(st => `
+            stratBody.innerHTML = strategies.map(st => {
+                const winRateRatio = finiteNumber(st.win_rate);
+                const barWidth = winRateRatio === null ? 0 : Math.min(winRateRatio * 100, 100);
+                return `
                 <div class="strategy-item">
                     <div class="strategy-top">
                         <div class="strategy-name">
                             ${st.name}
                             ${st.is_degraded ? '<span class="card-badge amber" style="margin-left: 6px; font-size: 9px;">DEGRADED</span>' : ''}
                         </div>
-                        <div class="strategy-wr">${(st.win_rate * 100).toFixed(1)}%</div>
+                        <div class="strategy-wr">${formatRatioPercent(st.win_rate)}</div>
                     </div>
                     <div class="bar-track">
-                        <div class="bar-fill ${st.is_degraded ? 'degraded' : ''}" style="width: ${Math.min(st.win_rate * 100, 100)}%"></div>
+                        <div class="bar-fill ${st.is_degraded ? 'degraded' : ''}" style="width: ${barWidth}%"></div>
                     </div>
                     <div style="display: flex; gap: 16px; margin-top: 6px;">
-                        <span style="font-size: 11px; color: var(--text-dim); font-family: 'JetBrains Mono', monospace;">PF ${st.profit_factor.toFixed(2)}</span>
-                        <span style="font-size: 11px; color: var(--text-dim); font-family: 'JetBrains Mono', monospace;">R:R ${st.avg_rr.toFixed(2)}</span>
-                        <span style="font-size: 11px; color: var(--text-dim); font-family: 'JetBrains Mono', monospace;">${st.total_signals} signals</span>
+                        <span style="font-size: 11px; color: var(--text-dim); font-family: 'JetBrains Mono', monospace;">PF ${formatNumber(st.profit_factor, 2)}</span>
+                        <span style="font-size: 11px; color: var(--text-dim); font-family: 'JetBrains Mono', monospace;">R:R ${formatNumber(st.avg_rr, 2)}</span>
+                        <span style="font-size: 11px; color: var(--text-dim); font-family: 'JetBrains Mono', monospace;">${formatCount(st.total_signals)} signals</span>
                     </div>
                 </div>
-            `).join('');
+            `}).join('');
         }
 
         // --- Backtest results ---
         const bt = data.backtests || {};
-        document.getElementById('bt-total').textContent = `${bt.total || 0} total`;
+        document.getElementById('bt-total').textContent = `${formatCount(bt.total)} total`;
         const btBody = document.getElementById('bt-body');
         const btEmpty = document.getElementById('bt-empty');
-        const btResults = bt.results || [];
+        const btResults = Array.isArray(bt.results) ? bt.results : [];
         if (btResults.length === 0) {
             btBody.innerHTML = '';
             btEmpty.style.display = 'block';
         } else {
             btEmpty.style.display = 'none';
             btBody.innerHTML = btResults.map(b => {
-                const wr = b.win_rate !== null ? (b.win_rate * 100).toFixed(1) + '%' : '--';
-                const wrColor = b.win_rate !== null ? (b.win_rate >= 0.5 ? 'var(--green)' : 'var(--red)') : 'var(--text-dim)';
-                const pf = b.profit_factor !== null ? b.profit_factor.toFixed(2) : '--';
-                const pfColor = b.profit_factor !== null ? (b.profit_factor >= 1.0 ? 'var(--green)' : 'var(--red)') : 'var(--text-dim)';
-                const sr = b.sharpe_ratio !== null ? b.sharpe_ratio.toFixed(2) : '--';
-                const dd = b.max_drawdown !== null ? b.max_drawdown.toFixed(1) : '--';
-                const exp = b.expectancy !== null ? b.expectancy.toFixed(2) : '--';
+                const winRateValue = finiteNumber(b.win_rate);
+                const profitFactorValue = finiteNumber(b.profit_factor);
+                const wr = formatRatioPercent(b.win_rate);
+                const wrColor = winRateValue !== null ? (winRateValue >= 0.5 ? 'var(--green)' : 'var(--red)') : 'var(--text-dim)';
+                const pf = formatNumber(b.profit_factor, 2);
+                const pfColor = profitFactorValue !== null ? (profitFactorValue >= 1.0 ? 'var(--green)' : 'var(--red)') : 'var(--text-dim)';
+                const sr = formatNumber(b.sharpe_ratio, 2);
+                const dd = formatNumber(b.max_drawdown, 1);
+                const exp = formatNumber(b.expectancy, 2);
                 return `
                     <tr>
                         <td style="color: var(--text-primary); font-size: 12px;">${b.strategy}</td>
@@ -1480,16 +1524,16 @@ async function refreshDashboard() {
         // --- Walk-forward validation ---
         const wfBody = document.getElementById('wf-body');
         const wfEmpty = document.getElementById('wf-empty');
-        const wfResults = bt.walk_forward || [];
+        const wfResults = Array.isArray(bt.walk_forward) ? bt.walk_forward : [];
         if (wfResults.length === 0) {
             wfBody.innerHTML = '';
             wfEmpty.style.display = 'block';
         } else {
             wfEmpty.style.display = 'none';
             wfBody.innerHTML = wfResults.map(w => {
-                const wr = w.win_rate !== null ? (w.win_rate * 100).toFixed(1) + '%' : '--';
-                const pf = w.profit_factor !== null ? w.profit_factor.toFixed(2) : '--';
-                const wfe = w.wfe !== null ? w.wfe.toFixed(3) : '--';
+                const wr = formatRatioPercent(w.win_rate);
+                const pf = formatNumber(w.profit_factor, 2);
+                const wfe = formatNumber(w.wfe, 3);
                 const overfitTag = w.is_overfitted
                     ? '<span class="result-tag sl">YES</span>'
                     : '<span class="result-tag tp">NO</span>';
@@ -1510,16 +1554,16 @@ async function refreshDashboard() {
         // --- Optimized params ---
         const optBody = document.getElementById('opt-body');
         const optEmpty = document.getElementById('opt-empty');
-        const optResults = bt.optimized_params || [];
+        const optResults = Array.isArray(bt.optimized_params) ? bt.optimized_params : [];
         if (optResults.length === 0) {
             optBody.innerHTML = '';
             optEmpty.style.display = 'block';
         } else {
             optEmpty.style.display = 'none';
             optBody.innerHTML = optResults.map(o => {
-                const wr = o.win_rate !== null ? (o.win_rate * 100).toFixed(1) + '%' : '--';
-                const pf = o.profit_factor !== null ? o.profit_factor.toFixed(2) : '--';
-                const wfe = o.wfe_ratio !== null ? o.wfe_ratio.toFixed(3) : '--';
+                const wr = formatRatioPercent(o.win_rate);
+                const pf = formatNumber(o.profit_factor, 2);
+                const wfe = formatNumber(o.wfe_ratio, 3);
                 const statusTag = o.is_overfitted
                     ? '<span class="result-tag sl">OVERFITTED</span>'
                     : '<span class="result-tag tp">ACTIVE</span>';
@@ -1539,8 +1583,9 @@ async function refreshDashboard() {
 
         // --- Jobs ---
         const jobsBody = document.getElementById('jobs-body');
-        document.getElementById('jobs-count').textContent = data.jobs.length;
-        jobsBody.innerHTML = data.jobs.map(j => `
+        const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+        document.getElementById('jobs-count').textContent = jobs.length;
+        jobsBody.innerHTML = jobs.map(j => `
             <tr>
                 <td style="color: var(--text-primary);">${j.name}</td>
                 <td style="font-size: 11px;">${j.trigger}</td>
@@ -1555,9 +1600,9 @@ async function refreshDashboard() {
             `Last refresh: ${now.toLocaleTimeString('en-GB')} · Auto-refreshes every 30s`;
 
     } catch (err) {
-        console.error('Dashboard refresh failed:', err);
+        console.error('Dashboard render failed:', err);
         document.getElementById('status-dot').className = 'status-dot degraded';
-        document.getElementById('system-label').textContent = 'CONNECTION ERROR';
+        document.getElementById('system-label').textContent = 'DASHBOARD ERROR';
     }
 }
 
@@ -1585,14 +1630,14 @@ function closeTradeSettingsModal() {
 }
 
 function fillTradeSettingsForm(settings) {
-    document.getElementById('setting-risk').value = (settings.risk_per_trade_pct * 100).toFixed(2);
+    document.getElementById('setting-risk').value = formatNumber(finiteNumber(settings.risk_per_trade_pct) * 100, 2);
     document.getElementById('setting-max-sl').value = settings.max_sl_pips;
     document.getElementById('setting-tp1').value = settings.tp1_rr;
     document.getElementById('setting-tp2').value = settings.tp2_rr;
     document.getElementById('setting-min-rr').value = settings.min_risk_reward;
     document.getElementById('setting-confidence').value = settings.min_confidence;
     document.getElementById('setting-max-active').value = settings.max_concurrent_signals;
-    document.getElementById('setting-daily-loss').value = (settings.daily_loss_limit_pct * 100).toFixed(2);
+    document.getElementById('setting-daily-loss').value = formatNumber(finiteNumber(settings.daily_loss_limit_pct) * 100, 2);
 }
 
 async function loadTradeSettings() {
