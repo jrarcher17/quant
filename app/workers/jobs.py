@@ -21,9 +21,67 @@ from app.models.signal import Signal
 from app.models.strategy import Strategy as StrategyModel
 from app.services.candle_ingestor import CandleIngestor
 from app.services.data_retention import DataRetentionService
+from app.services.didww_sms_notifier import DidwwSmsNotifier
 from app.services.failure_tracker import FailureTracker
 from app.services.outcome_detector import OutcomeDetector
 from app.services.telegram_notifier import TelegramNotifier
+
+
+def _telegram_notifier(settings) -> TelegramNotifier:
+    """Build the configured Telegram notifier."""
+    return TelegramNotifier(
+        bot_token=settings.telegram_bot_token,
+        chat_id=settings.telegram_chat_id,
+    )
+
+
+def _sms_notifier(settings) -> DidwwSmsNotifier:
+    """Build the configured DIDWW SMS notifier."""
+    return DidwwSmsNotifier(
+        username=settings.didww_sms_username,
+        password=settings.didww_sms_password,
+        source=settings.didww_sms_from,
+        destinations=settings.didww_sms_to,
+        campaign_id=settings.didww_sms_campaign_id,
+        endpoint=settings.didww_sms_endpoint,
+    )
+
+
+async def _notify_system_alert(settings, title: str, details: str) -> None:
+    """Send operational alerts to all configured notification channels."""
+    await _telegram_notifier(settings).notify_system_alert(title, details)
+    await _sms_notifier(settings).notify_system_alert(title, details)
+
+
+async def _notify_signal(settings, signal: Signal, strategy_name: str) -> None:
+    """Send signal alerts to all configured notification channels."""
+    await _telegram_notifier(settings).notify_signal(signal, strategy_name=strategy_name)
+    await _sms_notifier(settings).notify_signal(signal, strategy_name=strategy_name)
+
+
+async def _notify_outcome(settings, signal: Signal, outcome) -> None:
+    """Send outcome alerts to all configured notification channels."""
+    await _telegram_notifier(settings).notify_outcome(signal, outcome)
+    await _sms_notifier(settings).notify_outcome(signal, outcome)
+
+
+async def _notify_degradation(
+    settings,
+    strategy_name: str,
+    reason: str,
+    is_recovery: bool = False,
+) -> None:
+    """Send degradation/recovery alerts to all configured channels."""
+    await _telegram_notifier(settings).notify_degradation(
+        strategy_name,
+        reason,
+        is_recovery=is_recovery,
+    )
+    await _sms_notifier(settings).notify_degradation(
+        strategy_name,
+        reason,
+        is_recovery=is_recovery,
+    )
 
 
 async def refresh_candles(timeframe: str) -> None:
@@ -70,13 +128,10 @@ async def refresh_candles(timeframe: str) -> None:
         count = FailureTracker.record_failure(job_id)
         if FailureTracker.should_alert(job_id):
             settings = get_settings()
-            notifier = TelegramNotifier(
-                bot_token=settings.telegram_bot_token,
-                chat_id=settings.telegram_chat_id,
-            )
             err_type = type(exc).__name__
             err_msg = str(exc)[:200]
-            await notifier.notify_system_alert(
+            await _notify_system_alert(
+                settings,
                 "Candle Refresh Failing",
                 f"{timeframe} refresh has failed {count} consecutive times\n\n"
                 f"<b>Error:</b> {err_type}: {err_msg}",
@@ -329,25 +384,18 @@ async def run_signal_scanner() -> None:
             pipeline = SignalPipeline(selector, generator, risk_manager, gold_intel)
             signals = await pipeline.run(session)
 
-            # Send Telegram notifications for new signals (fire-and-forget)
+            # Send notifications for new signals (fire-and-forget)
             if signals:
                 settings = get_settings()
-                notifier = TelegramNotifier(
-                    bot_token=settings.telegram_bot_token,
-                    chat_id=settings.telegram_chat_id,
-                )
-                if notifier.enabled:
-                    # Look up strategy names via session.get() (cached per strategy_id)
-                    strat_lookup: dict[int, str] = {}
-                    for sig in signals:
-                        if sig.strategy_id not in strat_lookup:
-                            strat_row = await session.get(StrategyModel, sig.strategy_id)
-                            strat_lookup[sig.strategy_id] = (
-                                strat_row.name if strat_row else "Unknown"
-                            )
-                        await notifier.notify_signal(
-                            sig, strategy_name=strat_lookup[sig.strategy_id]
+                # Look up strategy names via session.get() (cached per strategy_id)
+                strat_lookup: dict[int, str] = {}
+                for sig in signals:
+                    if sig.strategy_id not in strat_lookup:
+                        strat_row = await session.get(StrategyModel, sig.strategy_id)
+                        strat_lookup[sig.strategy_id] = (
+                            strat_row.name if strat_row else "Unknown"
                         )
+                    await _notify_signal(settings, sig, strat_lookup[sig.strategy_id])
 
             logger.info(
                 "run_signal_scanner complete | signals_generated={}",
@@ -361,13 +409,10 @@ async def run_signal_scanner() -> None:
         count = FailureTracker.record_failure("run_signal_scanner")
         if FailureTracker.should_alert("run_signal_scanner"):
             settings = get_settings()
-            notifier = TelegramNotifier(
-                bot_token=settings.telegram_bot_token,
-                chat_id=settings.telegram_chat_id,
-            )
             err_type = type(exc).__name__
             err_msg = str(exc)[:200]
-            await notifier.notify_system_alert(
+            await _notify_system_alert(
+                settings,
                 "Signal Scanner Failing",
                 f"Signal scanner has failed {count} consecutive times\n\n"
                 f"<b>Error:</b> {err_type}: {err_msg}",
@@ -392,16 +437,11 @@ async def check_outcomes() -> None:
             outcomes = await detector.check_outcomes(session)
 
             if outcomes:
-                # Send Telegram notifications for each outcome
-                notifier = TelegramNotifier(
-                    bot_token=settings.telegram_bot_token,
-                    chat_id=settings.telegram_chat_id,
-                )
-                if notifier.enabled:
-                    for outcome in outcomes:
-                        signal = await session.get(Signal, outcome.signal_id)
-                        if signal:
-                            await notifier.notify_outcome(signal, outcome)
+                # Send notifications for each outcome
+                for outcome in outcomes:
+                    signal = await session.get(Signal, outcome.signal_id)
+                    if signal:
+                        await _notify_outcome(settings, signal, outcome)
 
                 # Run feedback checks (degradation detection, circuit breaker)
                 from app.services.feedback_controller import FeedbackController
@@ -424,11 +464,12 @@ async def check_outcomes() -> None:
                         session, sid
                     )
                     if is_degraded and reason:
-                        await notifier.notify_degradation(strat_name, reason)
+                        await _notify_degradation(settings, strat_name, reason)
 
                     recovered = await feedback.check_recovery(session, sid)
                     if recovered:
-                        await notifier.notify_degradation(
+                        await _notify_degradation(
+                            settings,
                             strat_name,
                             "Metrics recovered above thresholds",
                             is_recovery=True,
@@ -452,13 +493,10 @@ async def check_outcomes() -> None:
         count = FailureTracker.record_failure("check_outcomes")
         if FailureTracker.should_alert("check_outcomes"):
             settings = get_settings()
-            notifier = TelegramNotifier(
-                bot_token=settings.telegram_bot_token,
-                chat_id=settings.telegram_chat_id,
-            )
             err_type = type(exc).__name__
             err_msg = str(exc)[:200]
-            await notifier.notify_system_alert(
+            await _notify_system_alert(
+                settings,
                 "Outcome Detection Failing",
                 f"Outcome detection has failed {count} consecutive times\n\n"
                 f"<b>Error:</b> {err_type}: {err_msg}",
@@ -495,13 +533,10 @@ async def run_data_retention() -> None:
         count = FailureTracker.record_failure("run_data_retention")
         if FailureTracker.should_alert("run_data_retention"):
             settings = get_settings()
-            notifier = TelegramNotifier(
-                bot_token=settings.telegram_bot_token,
-                chat_id=settings.telegram_chat_id,
-            )
             err_type = type(exc).__name__
             err_msg = str(exc)[:200]
-            await notifier.notify_system_alert(
+            await _notify_system_alert(
+                settings,
                 "Data Retention Failing",
                 f"Data retention job has failed {count} consecutive times\n\n"
                 f"<b>Error:</b> {err_type}: {err_msg}",
@@ -577,10 +612,7 @@ async def send_health_digest() -> None:
                 "job_failures": job_failures,
             }
 
-            notifier = TelegramNotifier(
-                bot_token=settings.telegram_bot_token,
-                chat_id=settings.telegram_chat_id,
-            )
+            notifier = _telegram_notifier(settings)
             await notifier.notify_health_digest(stats)
 
             logger.info(
@@ -596,13 +628,10 @@ async def send_health_digest() -> None:
         count = FailureTracker.record_failure("send_health_digest")
         if FailureTracker.should_alert("send_health_digest"):
             settings = get_settings()
-            notifier = TelegramNotifier(
-                bot_token=settings.telegram_bot_token,
-                chat_id=settings.telegram_chat_id,
-            )
             err_type = type(exc).__name__
             err_msg = str(exc)[:200]
-            await notifier.notify_system_alert(
+            await _notify_system_alert(
+                settings,
                 "Health Digest Failing",
                 f"Health digest job has failed {count} consecutive times\n\n"
                 f"<b>Error:</b> {err_type}: {err_msg}",
@@ -669,10 +698,7 @@ async def run_param_optimization() -> None:
             db_strategies = {s.name: s.id for s in strat_result.scalars().all()}
 
             settings = get_settings()
-            notifier = TelegramNotifier(
-                bot_token=settings.telegram_bot_token,
-                chat_id=settings.telegram_chat_id,
-            )
+            notifier = _telegram_notifier(settings)
 
             import gc
             optimized_count = 0
@@ -779,13 +805,10 @@ async def run_param_optimization() -> None:
         count = FailureTracker.record_failure("run_param_optimization")
         if FailureTracker.should_alert("run_param_optimization"):
             settings = get_settings()
-            notifier = TelegramNotifier(
-                bot_token=settings.telegram_bot_token,
-                chat_id=settings.telegram_chat_id,
-            )
             err_type = type(exc).__name__
             err_msg = str(exc)[:200]
-            await notifier.notify_system_alert(
+            await _notify_system_alert(
+                settings,
                 "Param Optimization Failing",
                 f"Parameter optimization has failed {count} consecutive times\n\n"
                 f"<b>Error:</b> {err_type}: {err_msg}",

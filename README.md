@@ -86,6 +86,12 @@ Set these in a `.env` file at the project root (or export them in your shell / R
 | `BETTER_AUTH_SEED_USERS` | no | `""` | Closed-access user seed list: `email:password:name;second@example.com:password:Second User`. |
 | `TELEGRAM_BOT_TOKEN` | no | `""` | Leave blank to disable Telegram alerts |
 | `TELEGRAM_CHAT_ID` | no | `""` | Your chat/channel ID for alerts |
+| `DIDWW_SMS_USERNAME` | no | `""` | DIDWW HTTP OUT trunk username. Leave blank to disable SMS alerts. |
+| `DIDWW_SMS_PASSWORD` | no | `""` | DIDWW HTTP OUT trunk password. |
+| `DIDWW_SMS_FROM` | no | `""` | SMS-enabled DIDWW source number, digits only or E.164 format. |
+| `DIDWW_SMS_TO` | no | `""` | Recipient phone number(s), comma/space/semicolon separated. |
+| `DIDWW_SMS_CAMPAIGN_ID` | no | `""` | Optional DIDWW A2P campaign ID. Required only if your trunk/campaign setup needs it. |
+| `DIDWW_SMS_ENDPOINT` | no | `https://sms-out.didww.com` | DIDWW SMS OUT endpoint. Regional endpoints are also supported. |
 
 Example `.env`:
 
@@ -103,6 +109,12 @@ AUTH_SERVICE_URL=http://127.0.0.1:3000
 BETTER_AUTH_SEED_USERS=admin@example.com:change-this-password:QuantLive Admin
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
+DIDWW_SMS_USERNAME=
+DIDWW_SMS_PASSWORD=
+DIDWW_SMS_FROM=
+DIDWW_SMS_TO=
+DIDWW_SMS_CAMPAIGN_ID=
+DIDWW_SMS_ENDPOINT=https://sms-out.didww.com
 ```
 
 ## Run with Docker
@@ -128,6 +140,7 @@ This repo ships with a `railway.json` and `Dockerfile` that Railway picks up aut
    - `BETTER_AUTH_SEED_USERS` for your initial invited users
    - `ACCOUNT_BALANCE` (optional)
    - `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (optional)
+   - `DIDWW_SMS_USERNAME`, `DIDWW_SMS_PASSWORD`, `DIDWW_SMS_FROM`, `DIDWW_SMS_TO` (optional)
 4. Deploy. Railway runs the Dockerfile, which applies migrations and starts the app on the port Railway exposes.
 5. Health check is `/health`.
 

@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # DIDWW SMS (optional -- system works without these configured)
+    didww_sms_username: str = ""
+    didww_sms_password: str = ""
+    didww_sms_from: str = ""
+    didww_sms_to: str = ""
+    didww_sms_campaign_id: str = ""
+    didww_sms_endpoint: str = "https://sms-out.didww.com"
+
     @model_validator(mode="after")
     def normalize_database_url(self) -> "Settings":
         """Ensure DATABASE_URL uses the asyncpg driver.
