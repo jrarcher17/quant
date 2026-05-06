@@ -2,7 +2,7 @@
 
 import datetime
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +13,9 @@ from app.models.outcome import Outcome
 from app.models.signal import Signal
 
 router = APIRouter(prefix="/chart", tags=["chart"])
+
+VALID_TIMEFRAMES = {"M15", "H1", "H4", "D1"}
+MAX_RANGE_DAYS = 14
 
 
 def _to_unix_seconds(dt: datetime.datetime) -> int:
@@ -33,22 +36,46 @@ def _outcome_color(result: str | None, status: str) -> str:
     return "#888888"  # gray (expired or other)
 
 
+def _is_valid_chart_candle(candle: Candle, median_close: float) -> bool:
+    """Filter obvious bad ticks so one outlier does not flatten the chart."""
+    values = [
+        float(candle.open),
+        float(candle.high),
+        float(candle.low),
+        float(candle.close),
+    ]
+    if any(value <= 0 for value in values):
+        return False
+    if not (values[2] <= min(values[0], values[3]) <= max(values[0], values[3]) <= values[1]):
+        return False
+    # XAUUSD should not move anywhere near this much inside one dashboard range.
+    return all(median_close * 0.5 <= value <= median_close * 1.5 for value in values)
+
+
 @router.get("/candles")
 async def get_chart_candles(
-    limit: int = 500,
+    timeframe: str = Query(default="H1", pattern="^(M15|H1|H4|D1)$"),
+    range_days: float = Query(default=14, gt=0, le=MAX_RANGE_DAYS),
+    limit: int = Query(default=1500, gt=0, le=5000),
     session: AsyncSession = Depends(get_session),
 ):
-    """Return H1 candle data as JSON with Unix timestamp seconds.
+    """Return candle data as JSON with Unix timestamp seconds.
 
     Candles are returned in chronological order (oldest first) as required
     by TradingView Lightweight Charts.
     """
     try:
         symbol = get_settings().trading_symbol
+        timeframe = timeframe.upper()
+        if timeframe not in VALID_TIMEFRAMES:
+            timeframe = "H1"
+
+        cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=range_days)
         query = (
             select(Candle)
             .where(Candle.symbol == symbol)
-            .where(Candle.timeframe == "H1")
+            .where(Candle.timeframe == timeframe)
+            .where(Candle.timestamp >= cutoff)
             .order_by(Candle.timestamp.desc())
             .limit(limit)
         )
@@ -57,6 +84,14 @@ async def get_chart_candles(
 
         # Reverse to chronological order (oldest first)
         candles.reverse()
+        if candles:
+            closes = sorted(float(c.close) for c in candles if float(c.close) > 0)
+            if closes:
+                median_close = closes[len(closes) // 2]
+                candles = [
+                    candle for candle in candles
+                    if _is_valid_chart_candle(candle, median_close)
+                ]
 
         return [
             {
@@ -74,7 +109,8 @@ async def get_chart_candles(
 
 @router.get("/signals")
 async def get_chart_signals(
-    limit: int = 100,
+    range_days: float = Query(default=14, gt=0, le=MAX_RANGE_DAYS),
+    limit: int = Query(default=100, gt=0, le=500),
     session: AsyncSession = Depends(get_session),
 ):
     """Return signal data with outcome colors for chart markers.
@@ -84,10 +120,12 @@ async def get_chart_signals(
     """
     try:
         symbol = get_settings().trading_symbol
+        cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=range_days)
         query = (
             select(Signal, Outcome)
             .outerjoin(Outcome, Signal.id == Outcome.signal_id)
             .where(Signal.symbol == symbol)
+            .where(Signal.created_at >= cutoff)
             .order_by(Signal.created_at.desc())
             .limit(limit)
         )
