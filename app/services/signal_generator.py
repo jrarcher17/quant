@@ -1,0 +1,461 @@
+"""Signal generator service: generation, validation, dedup, expiry, and bias detection.
+
+Transforms strategy analysis into validated, de-duplicated trade signals.
+Float math internally; Decimal(str(round(x, 2))) at persistence boundary only.
+"""
+
+from datetime import datetime, timedelta, timezone
+
+from loguru import logger
+from sqlalchemy import and_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import get_settings
+from app.models.candle import Candle
+from app.models.signal import Signal
+from app.services.trade_settings import get_trade_settings
+
+# ---------------------------------------------------------------------------
+# Configuration constants
+# ---------------------------------------------------------------------------
+
+MIN_RR: float = 1.3  # Minimum risk:reward ratio (1:1.3)
+MIN_CONFIDENCE: float = 40.0  # Minimum confidence threshold (%)
+MAX_SL_PIPS: float = 800.0  # Max stop loss distance (pips); ~$80 ≈ 1.5% at XAU $5,300
+PIP_VALUE: float = 0.10  # XAUUSD: $0.10 price movement per pip
+DEDUP_WINDOW_HOURS: int = 1  # Same-direction dedup window (hours)
+EXPIRY_HOURS: dict[str, int] = {
+    "M15": 4,   # Scalp: 4 hours
+    "H1": 8,    # Intraday: 8 hours
+    "H4": 24,   # Intraday/swing: 24 hours
+    "D1": 48,   # Swing: 48 hours
+}
+BIAS_WINDOW_SIGNALS: int = 20  # Number of recent signals to check for bias
+BIAS_SKEW_THRESHOLD: float = 0.75  # >75% same direction flags bias
+
+
+class SignalGenerator:
+    """Generates, validates, deduplicates, and expires trade signals.
+
+    Usage (within pipeline orchestrator)::
+
+        sg = SignalGenerator()
+        candidates = await sg.generate(session, "liquidity_sweep")
+        validated = await sg.validate(session, candidates)
+        # Persist validated signals in pipeline (Plan 05)
+    """
+
+    async def generate(
+        self,
+        session: AsyncSession,
+        strategy_name: str,
+    ) -> list:
+        """Run a strategy's analyze() on latest candle data.
+
+        Imports strategy modules inside the method body to trigger
+        auto-registration and avoid circular imports (Phase 3 pattern).
+
+        Args:
+            session: Async database session.
+            strategy_name: Registered strategy name (e.g. "liquidity_sweep").
+
+        Returns:
+            List of CandidateSignal instances (may be empty).
+        """
+        # --- Lazy imports (circular-import avoidance, Phase 3 pattern) ---
+        from app.strategies.base import (
+            BaseStrategy,
+            CandidateSignal,
+            InsufficientDataError,
+            candles_to_dataframe,
+        )
+        # Import concrete strategies to trigger registration
+        import app.strategies.liquidity_sweep  # noqa: F401
+        import app.strategies.trend_continuation  # noqa: F401
+        import app.strategies.breakout_expansion  # noqa: F401
+        import app.strategies.ema_momentum  # noqa: F401
+
+        # 1. Get strategy instance (with optimized params and trade settings if available)
+        opt_params = await self._load_optimized_params(session, strategy_name)
+        trade_settings = await get_trade_settings(session)
+        registry = BaseStrategy.get_registry()
+        strategy_cls = registry.get(strategy_name)
+        if strategy_cls is None:
+            logger.error(
+                "Strategy '{}' not found in registry. Available: {}",
+                strategy_name,
+                list(registry.keys()),
+            )
+            return []
+        params = dict(opt_params or {})
+        for key, value in {
+            "TP1_RR": trade_settings.tp1_rr,
+            "TP2_RR": trade_settings.tp2_rr,
+            "MAX_SL_PIPS": trade_settings.max_sl_pips,
+        }.items():
+            if key in strategy_cls.DEFAULT_PARAMS:
+                params[key] = value
+
+        strategy = BaseStrategy.get_strategy(strategy_name, params=params)
+
+        if params:
+            logger.info(
+                "Using params for '{}': {}",
+                strategy_name,
+                {k: v for k, v in params.items()
+                 if v != strategy_cls.DEFAULT_PARAMS.get(k)},
+            )
+        else:
+            logger.debug("Using default params for '{}'", strategy_name)
+
+        # 2. Query latest candles for the strategy's primary timeframe
+        primary_tf = strategy.required_timeframes[0]
+        limit = strategy.min_candles + 50  # Extra buffer
+        symbol = get_settings().trading_symbol
+
+        stmt = (
+            select(Candle)
+            .where(
+                and_(
+                    Candle.symbol == symbol,
+                    Candle.timeframe == primary_tf,
+                )
+            )
+            .order_by(Candle.timestamp.desc())
+            .limit(limit)
+        )
+        result = await session.execute(stmt)
+        candles = result.scalars().all()
+
+        if not candles:
+            logger.warning(
+                "No candles found for {}/{} -- cannot generate signals",
+                symbol,
+                primary_tf,
+            )
+            return []
+
+        # 3. Convert to DataFrame (sorts ascending internally)
+        df = candles_to_dataframe(list(candles))
+
+        # 4. Run strategy analysis
+        try:
+            candidates: list[CandidateSignal] = strategy.analyze(df)
+        except InsufficientDataError as exc:
+            logger.warning(
+                "Insufficient data for strategy '{}': {}",
+                strategy_name,
+                exc,
+            )
+            return []
+
+        for candidate in candidates:
+            candidate.symbol = symbol
+
+        # 5. Filter stale candidates -- only keep signals from recent candles.
+        # Strategies scan the entire lookback window and produce signals for
+        # historical bars where patterns occurred. But those entry prices are
+        # stale -- the market has moved, so the outcome detector would
+        # instantly trigger TP/SL. Only accept signals from the last 3 bars.
+        if candidates:
+            # Staleness cutoff: 3x the timeframe interval
+            tf_hours = {"M15": 0.25, "H1": 1, "H4": 4, "D1": 24}
+            interval_hours = tf_hours.get(primary_tf, 1)
+            staleness_cutoff = datetime.now(timezone.utc) - timedelta(
+                hours=interval_hours * 3
+            )
+
+            fresh = []
+            stale_count = 0
+            for c in candidates:
+                c_ts = c.timestamp
+                if c_ts is not None:
+                    # Handle naive timestamps
+                    if c_ts.tzinfo is None:
+                        c_ts = c_ts.replace(tzinfo=timezone.utc)
+                    if c_ts >= staleness_cutoff:
+                        fresh.append(c)
+                    else:
+                        stale_count += 1
+                else:
+                    fresh.append(c)  # no timestamp = keep
+
+            if stale_count > 0:
+                logger.info(
+                    "Strategy '{}': filtered {} stale candidates "
+                    "(older than {}), {} fresh remain",
+                    strategy_name,
+                    stale_count,
+                    staleness_cutoff.isoformat(),
+                    len(fresh),
+                )
+            candidates = fresh
+
+        if candidates:
+            logger.info(
+                "Strategy '{}' produced {} candidate signal(s)",
+                strategy_name,
+                len(candidates),
+            )
+        else:
+            logger.info(
+                "Strategy '{}' produced 0 candidates from {} candles "
+                "(timeframe={}, scanned last ~{} bars)",
+                strategy_name,
+                len(df),
+                primary_tf,
+                max(0, len(df) - strategy.min_candles),
+            )
+        return candidates
+
+    @staticmethod
+    async def _load_optimized_params(
+        session: AsyncSession,
+        strategy_name: str,
+    ) -> dict[str, float] | None:
+        """Load active, non-overfitted optimized params for a strategy.
+
+        Returns the params dict if found, or None to use defaults.
+        Gracefully returns None if the optimized_params table doesn't exist.
+        """
+        try:
+            from app.models.optimized_params import OptimizedParams
+
+            stmt = (
+                select(OptimizedParams.params)
+                .where(
+                    and_(
+                        OptimizedParams.strategy_name == strategy_name,
+                        OptimizedParams.is_active.is_(True),
+                        OptimizedParams.is_overfitted.isnot(True),
+                    )
+                )
+                .order_by(OptimizedParams.created_at.desc())
+                .limit(1)
+            )
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            return row if row else None
+        except Exception as exc:
+            logger.warning(
+                "Could not load optimized params for '{}': {} -- using defaults",
+                strategy_name,
+                str(exc)[:120],
+            )
+            # Rollback the failed transaction so the session is usable
+            await session.rollback()
+            return None
+
+    async def validate(
+        self,
+        session: AsyncSession,
+        candidates: list,
+    ) -> list:
+        """Apply validation filters to candidate signals.
+
+        Filters applied in order:
+          1. R:R >= MIN_RR  (reject below)
+          2. Confidence >= MIN_CONFIDENCE  (reject below)
+          3. Dedup check within DEDUP_WINDOW_HOURS  (suppress duplicates)
+          4. Directional bias check  (warn only, does not reject)
+
+        Args:
+            session: Async database session.
+            candidates: List of CandidateSignal instances.
+
+        Returns:
+            Filtered list of CandidateSignal instances that passed all filters.
+        """
+        validated: list = []
+        trade_settings = await get_trade_settings(session)
+
+        for candidate in candidates:
+            # --- Filter 1: R:R threshold (SIG-03) ---
+            rr = float(candidate.risk_reward)
+            if rr < trade_settings.min_risk_reward:
+                logger.info(
+                    "Signal rejected: R:R {:.2f} below minimum {:.2f}",
+                    rr,
+                    trade_settings.min_risk_reward,
+                )
+                continue
+
+            # --- Filter 2: Max SL distance ---
+            sl_dist = abs(float(candidate.entry_price) - float(candidate.stop_loss))
+            sl_pips = sl_dist / PIP_VALUE
+            if sl_pips > trade_settings.max_sl_pips:
+                logger.info(
+                    "Signal rejected: SL {:.0f} pips exceeds max {:.0f} pips",
+                    sl_pips,
+                    trade_settings.max_sl_pips,
+                )
+                continue
+
+            # --- Filter 3: Confidence threshold (SIG-04) ---
+            conf = float(candidate.confidence)
+            if conf < trade_settings.min_confidence:
+                logger.info(
+                    "Signal rejected: confidence {:.1f}% below minimum {:.1f}%",
+                    conf,
+                    trade_settings.min_confidence,
+                )
+                continue
+
+            # --- Filter 3: Dedup (SIG-05) ---
+            if await self._is_duplicate(session, candidate):
+                logger.info(
+                    "Signal suppressed: duplicate {} signal within {}h window",
+                    candidate.direction.value,
+                    DEDUP_WINDOW_HOURS,
+                )
+                continue
+
+            # --- Filter 4: Directional bias (SIG-07) ---
+            if await self._check_directional_bias(session, candidate):
+                logger.warning(
+                    "Directional bias detected: >{}% of recent signals are {}",
+                    int(BIAS_SKEW_THRESHOLD * 100),
+                    candidate.direction.value,
+                )
+                # Informational only -- do NOT reject; append note to reasoning
+                candidate = candidate.model_copy(
+                    update={
+                        "reasoning": (
+                            candidate.reasoning
+                            + " [NOTE: directional bias detected"
+                            f" -- >{int(BIAS_SKEW_THRESHOLD * 100)}% of"
+                            f" last {BIAS_WINDOW_SIGNALS} signals are"
+                            f" {candidate.direction.value}]"
+                        ),
+                    }
+                )
+
+            validated.append(candidate)
+
+        logger.info(
+            "Validation complete: {}/{} candidates passed all filters",
+            len(validated),
+            len(candidates),
+        )
+        return validated
+
+    async def _is_duplicate(
+        self,
+        session: AsyncSession,
+        candidate: object,
+    ) -> bool:
+        """Check if an active signal with the same direction exists within the dedup window.
+
+        Args:
+            session: Async database session.
+            candidate: CandidateSignal with symbol and direction attributes.
+
+        Returns:
+            True if a duplicate active signal exists (suppress this candidate).
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=DEDUP_WINDOW_HOURS)
+
+        stmt = (
+            select(Signal.id)
+            .where(
+                and_(
+                    Signal.symbol == candidate.symbol,
+                    Signal.direction == candidate.direction.value,
+                    Signal.status == "active",
+                    Signal.created_at >= cutoff,
+                )
+            )
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none() is not None
+
+    async def _check_directional_bias(
+        self,
+        session: AsyncSession,
+        candidate: object,
+    ) -> bool:
+        """Detect if recent signal distribution is systematically skewed.
+
+        Checks the last BIAS_WINDOW_SIGNALS signals. If the candidate's
+        direction accounts for more than BIAS_SKEW_THRESHOLD of those
+        signals, returns True (biased).
+
+        Args:
+            session: Async database session.
+            candidate: CandidateSignal with direction attribute.
+
+        Returns:
+            True if directional bias is detected.
+        """
+        stmt = (
+            select(Signal.direction)
+            .order_by(Signal.created_at.desc())
+            .limit(BIAS_WINDOW_SIGNALS)
+        )
+        result = await session.execute(stmt)
+        directions = result.scalars().all()
+
+        # Not enough data to judge bias
+        if len(directions) < BIAS_WINDOW_SIGNALS:
+            return False
+
+        same_direction_count = sum(
+            1 for d in directions if d == candidate.direction.value
+        )
+        ratio = same_direction_count / len(directions)
+
+        return ratio > BIAS_SKEW_THRESHOLD
+
+    def compute_expiry(self, candidate: object) -> datetime:
+        """Compute the expiry timestamp for a candidate signal.
+
+        Uses the timeframe-specific EXPIRY_HOURS mapping, defaulting
+        to 8 hours if the timeframe is not explicitly configured.
+
+        Expiry is based on the current wall-clock time (when the signal
+        is persisted), NOT the candle timestamp — the candle may be
+        hours old by the time the pipeline runs.
+
+        Args:
+            candidate: CandidateSignal with timeframe attribute.
+
+        Returns:
+            Expiry datetime (UTC).
+        """
+        expiry_hours = EXPIRY_HOURS.get(candidate.timeframe, 8)
+        return datetime.now(timezone.utc) + timedelta(hours=expiry_hours)
+
+    async def expire_stale_signals(self, session: AsyncSession) -> int:
+        """Mark active signals past their expiry as expired.
+
+        Runs before each scanner cycle to clean up stale signals.
+
+        Args:
+            session: Async database session.
+
+        Returns:
+            Number of signals expired.
+        """
+        now = datetime.now(timezone.utc)
+
+        stmt = (
+            update(Signal)
+            .where(
+                and_(
+                    Signal.status == "active",
+                    Signal.expires_at.isnot(None),
+                    Signal.expires_at < now,
+                )
+            )
+            .values(status="expired")
+        )
+        result = await session.execute(stmt)
+        count = result.rowcount
+
+        if count > 0:
+            logger.info("Expired {} stale signal(s)", count)
+        else:
+            logger.debug("No stale signals to expire")
+
+        return count

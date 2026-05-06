@@ -1,0 +1,140 @@
+# Project State
+
+## Project Reference
+
+See: .planning/PROJECT.md (updated 2026-02-17)
+
+**Core value:** Deliver 1-2 high-conviction, statistically validated XAUUSD trade signals per day with full automation from generation through outcome tracking.
+**Current focus:** Phase 7 - Production Hardening (IN PROGRESS)
+
+## Current Position
+
+Phase: 7 of 7 (Production Hardening)
+Plan: 2 of 2 in current phase
+Status: In progress (07-01 pending)
+Last activity: 2026-02-17 -- Completed 07-02-PLAN.md (Data Retention & Failure Tracking)
+
+Progress: [#######################-] 96% (23/24 plans)
+
+## Performance Metrics
+
+**Velocity:**
+- Total plans completed: 23
+- Average duration: 3.4min
+- Total execution time: 1.38 hours
+
+**By Phase:**
+
+| Phase | Plans | Total | Avg/Plan |
+|-------|-------|-------|----------|
+| 01-data-foundation | 3/3 | 24min | 8min |
+| 02-strategy-engine | 3/3 | 14min | 4.7min |
+| 03-backtesting-engine | 3/3 | 11min | 3.7min |
+| 04-signal-pipeline | 5/5 | 16min | 3.2min |
+| 05-delivery-and-visibility | 2/2 | 5min | 2.5min |
+| 06-outcome-tracking-and-feedback | 3/3 | 12min | 4min |
+| 07-production-hardening | 1/2 | 3min | 3min |
+
+**Recent Trend:**
+- Last 5 plans: 06-01 (3min), 06-02 (3min), 06-03 (6min), 07-02 (3min)
+- Trend: stable, ~3-4min/plan
+
+*Updated after each plan completion*
+
+## Accumulated Context
+
+### Decisions
+
+Decisions are logged in PROJECT.md Key Decisions table.
+Recent decisions affecting current work:
+
+- [Roadmap]: 7-phase structure derived from 73 requirements across 12 categories
+- [Roadmap]: Phase 4 (Signal Pipeline) consolidates strategy selection, signal generation, risk management, and gold intelligence into one vertical slice
+- [Roadmap]: Production deployment (Railway) deferred to Phase 7 -- local development through Phases 1-6
+- [01-01]: Numeric(10,2) for prices, Numeric(10,4) for metrics -- never Float for financial data
+- [01-01]: MemoryJobStore for APScheduler (avoids sync driver dependency)
+- [01-01]: asynccontextmanager lifespan instead of deprecated on_event decorators
+- [01-01]: lru_cache singleton for Settings; pool_pre_ping=True for connection resilience
+- [01-01]: PostgreSQL 17 + Python 3.12 installed via Homebrew for local development
+- [01-02]: Synchronous TDClient wrapped with tenacity retry (3 attempts, exponential backoff max 30s)
+- [01-02]: SQL literal for interval in generate_series (asyncpg cannot bind string as interval type)
+- [01-02]: CronTrigger for precise candle-close alignment with 1-minute offset
+- [01-02]: TimeframeEnum for path parameter validation at FastAPI level
+- [01-03]: Per-test engine isolation for asyncpg (avoids connection contention with session.commit)
+- [01-03]: Table truncation (DELETE) for test isolation instead of transaction rollback
+- [01-03]: goldsignal_test as separate test database (configurable via TEST_DATABASE_URL)
+- [02-01]: pandas_ta_classic import name (not pandas_ta) for pandas-ta-classic package
+- [02-01]: Class attributes for name/required_timeframes/min_candles instead of abstract properties
+- [02-01]: detect_bos as alias for detect_structure_shift for plan artifact compatibility
+- [02-02]: Simplified confirmation (close beyond sweep extreme within 3 bars) for v1 rather than full BOS/CHoCH
+- [02-02]: Additive confidence scoring (base 50, +10 per bonus) capped at 100
+- [02-02]: Float math internally, Decimal(str(round(x, 2))) at CandidateSignal boundary
+- [02-03]: Momentum confirmation uses next bar (i+1) to avoid lookahead bias
+- [02-03]: EMA spread widening uses simplified heuristic (no historical EMA storage)
+- [02-03]: Breakout triggers on first non-compressed bar after consolidation exits
+- [03-01]: SL always takes priority over TP when both could hit in same bar (conservative)
+- [03-01]: XAUUSD pip value = $0.10 price movement; MAX_BARS_FORWARD = 72 (3 days at H1)
+- [03-01]: Spread model returns tightest spread when multiple sessions overlap
+- [03-01]: profit_factor capped at 9999.9999 for Numeric(10,4) DB compatibility
+- [03-01]: BUY entry adjusted up by spread (ask), SELL SL checked against high + spread
+- [03-02]: Mutable default avoidance: window_days_list defaults to None, set to [30, 60] in method body
+- [03-02]: Force-added Alembic migration despite gitignore rule for version control tracking
+- [03-03]: Strategy imports inside run_daily_backtests() to avoid circular imports and trigger registry
+- [03-03]: Walk-forward efficiency averaged across win_rate and profit_factor WFE ratios
+- [03-03]: BacktestResult rows tagged with spread_model="session_aware" for traceability
+- [04-01]: Dataclass for StrategyScore (internal scoring, no serialization boundary)
+- [04-01]: Degradation baseline is OLDEST non-walk-forward BacktestResult per strategy
+- [04-01]: Backtest result fallback chain: 60-day -> 30-day -> any non-walk-forward
+- [04-02]: Dedup checks symbol + direction + active status within 4h window (not strategy-specific)
+- [04-02]: Bias detection is informational only -- appends note to reasoning, never rejects signals
+- [04-03]: Daily P&L derived from DB each check (not cached counter) to avoid stale state across days
+- [04-03]: ATR factor = baseline/current with 0.5x-1.5x clamp for volatility-adjusted sizing
+- [04-03]: PIP_VALUE = $0.10 for XAUUSD (consistent with backtester 03-01)
+- [04-03]: check() uses 1.0/1.0 default ATR until SignalPipeline provides real values
+- [04-04]: DXY correlation informational only -- divergence appends to reasoning, does not modify confidence
+- [04-04]: No session-based suppression -- all sessions allowed; overlap gets +5 confidence boost
+- [04-04]: Session label priority: "overlap" if active, else first active session, else "off_hours"
+- [04-05]: Module-level _last_scanned_ts for stale data guard (simplest approach, no extra DB query)
+- [04-05]: Pipeline does not catch exceptions -- job handler wraps all work in try/except
+- [04-05]: Position size appended to reasoning string (no separate metadata column needed)
+- [05-01]: HTML parse mode for all Telegram messages (avoids MarkdownV2 escaping with gold prices)
+- [05-01]: Notification wiring in jobs.py (not signal_pipeline.py) to keep pipeline focused
+- [05-01]: notify_outcome() built and tested but NOT wired -- Phase 6 builds outcome detection
+- [05-01]: Strategy name lookup via session.get() in jobs.py with dict caching per strategy_id
+- [05-02]: TradingView Lightweight Charts v5.1 loaded from unpkg CDN (no npm build step)
+- [05-02]: Jinja2Templates with absolute path resolution via Path(__file__).resolve()
+- [05-02]: UTC-defensive Unix timestamp conversion with naive-datetime guard
+- [05-02]: LEFT JOIN Signal-Outcome for color-coded historical markers
+- [06-01]: Pure _evaluate_signal separated from async I/O for testability
+- [06-01]: exit_price = current bid price (not SL/TP level) for accurate PnL
+- [06-01]: Debug-level logging for no-outcome checks (30s interval = 2880/day)
+- [06-02]: Live blending weight: 70% backtest + 30% live, only when >= 5 live signals exist
+- [06-02]: Live score weights: 0.40 * win_rate + 0.35 * profit_factor_norm + 0.25 * avg_rr_norm
+- [06-02]: PerformanceTracker triggered only on new outcomes (not on every 30s check)
+- [06-02]: is_degraded field left False in PerformanceTracker -- FeedbackController manages it in 06-03
+- [06-03]: Circuit breaker state stored as class-level attributes (not DB) since app is single-process with MemoryJobStore
+- [06-03]: Lazy import of FeedbackController in RiskManager.check() to avoid circular import
+- [06-03]: Recovery checks 7d StrategyPerformance for recent metrics and 30d row for degradation timestamp
+- [07-02]: Class-level state for FailureTracker (consistent with circuit breaker pattern from 06-03)
+- [07-02]: SQLAlchemy delete() for retention (not raw SQL) for type safety and model consistency
+- [07-02]: Only M15 (90d) and H1 (365d) candles pruned; H4/D1/signals/outcomes explicitly excluded
+- [07-02]: Health digest collects candle counts, active signals, today's outcomes, and job failure counts
+
+### Pending Todos
+
+None yet.
+
+### Blockers/Concerns
+
+- Twelve Data free tier rate limits (800 req/day) may be insufficient -- design aggressive caching from Phase 1
+- vectorbt not used -- walk-forward implemented with pure pandas 80/20 split (simpler, no extra dependency)
+- Economic calendar API selection unresolved -- evaluate during Phase 5 planning
+- Alembic requires PYTHONPATH set to project root when run from CLI (prefix with PYTHONPATH=.)
+- TWELVE_DATA_API_KEY still set to placeholder -- needs real key before live ingestion
+- Pre-existing test failure in test_signal_pipeline.py::test_pipeline_risk_rejects_all (mock coroutine issue in _compute_atr)
+
+## Session Continuity
+
+Last session: 2026-02-17T23:58:00Z
+Stopped at: Completed 07-02-PLAN.md (Data Retention & Failure Tracking)
+Resume file: None
