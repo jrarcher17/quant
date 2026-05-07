@@ -1061,6 +1061,16 @@
                 <input id="setting-daily-loss" name="daily_loss_limit_pct" type="number" min="0.1" max="50" step="0.1" required>
                 <div class="field-help">Stops new signals after daily losses reach this account percentage.</div>
             </div>
+            <div class="settings-field">
+                <label for="setting-hedge-confidence">Hedge Min Confidence</label>
+                <input id="setting-hedge-confidence" name="hedge_min_confidence" type="number" min="0" max="100" step="1" required>
+                <div class="field-help">Confidence required to fire a signal opposite to an active position. 100 = never hedge; lower (e.g. 85) to allow high-conviction reversals.</div>
+            </div>
+            <div class="settings-field">
+                <label for="setting-hedge-risk-mult">Hedge Risk Multiplier</label>
+                <input id="setting-hedge-risk-mult" name="hedge_risk_multiplier" type="number" min="0" max="1" step="0.05" required>
+                <div class="field-help">Fraction of normal risk applied to hedge signals. 0.5 = half size; 1.0 = same as primary signals.</div>
+            </div>
         </div>
 
         <div class="modal-error" id="trade-settings-error"></div>
@@ -1724,6 +1734,8 @@ function fillTradeSettingsForm(settings) {
     document.getElementById('setting-confidence').value = settings.min_confidence;
     document.getElementById('setting-max-active').value = settings.max_concurrent_signals;
     document.getElementById('setting-daily-loss').value = formatNumber(finiteNumber(settings.daily_loss_limit_pct) * 100, 2);
+    document.getElementById('setting-hedge-confidence').value = settings.hedge_min_confidence;
+    document.getElementById('setting-hedge-risk-mult').value = settings.hedge_risk_multiplier;
 }
 
 async function loadTradeSettings() {
@@ -1755,6 +1767,8 @@ function readTradeSettingsForm() {
         min_confidence: Number(document.getElementById('setting-confidence').value),
         max_concurrent_signals: Number(document.getElementById('setting-max-active').value),
         daily_loss_limit_pct: dailyLossPct,
+        hedge_min_confidence: Number(document.getElementById('setting-hedge-confidence').value),
+        hedge_risk_multiplier: Number(document.getElementById('setting-hedge-risk-mult').value),
     };
 }
 

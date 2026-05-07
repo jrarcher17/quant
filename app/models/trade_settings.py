@@ -39,6 +39,19 @@ class TradeSettings(Base):
     daily_loss_limit_pct: Mapped[Decimal] = mapped_column(
         Numeric(5, 4), nullable=False, default=Decimal("0.0200")
     )
+    # Minimum confidence required to fire a signal in the opposite direction
+    # of an active position. 100.00 = effectively disabled (very few candidates
+    # ever score that high). Lower this (e.g. 80) to enable hedge / reversal
+    # plays through the opposite-direction block in SignalPipeline.
+    hedge_min_confidence: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), nullable=False, default=Decimal("100.00")
+    )
+    # Multiplier applied to `risk_per_trade_pct` when the candidate is a
+    # hedge (opposite-direction override). 0.5 = half the usual risk.
+    # Range 0.0..1.0; set 1.0 to size hedges identically to primary signals.
+    hedge_risk_multiplier: Mapped[Decimal] = mapped_column(
+        Numeric(4, 3), nullable=False, default=Decimal("0.500")
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

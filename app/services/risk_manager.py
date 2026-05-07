@@ -163,24 +163,40 @@ class RiskManager:
             sl_distance = abs(
                 float(candidate.entry_price) - float(candidate.stop_loss)
             )
+
+            # Hedge candidates risk a configurable fraction of the per-trade
+            # risk budget (default 0.5x). Primary signals use the full budget.
+            is_hedge = bool(getattr(candidate, "is_hedge", False))
+            risk_pct = trade_settings.risk_per_trade_pct
+            if is_hedge:
+                risk_pct = (
+                    trade_settings.risk_per_trade_pct
+                    * trade_settings.hedge_risk_multiplier
+                )
+
             position_size = self.calculate_position_size(
                 sl_distance_price=sl_distance,
                 current_atr=current_atr,
                 baseline_atr=baseline_atr,
-                risk_per_trade_pct=trade_settings.risk_per_trade_pct,
+                risk_per_trade_pct=risk_pct,
             )
 
             account_balance = get_settings().account_balance
-            risk_amount = account_balance * trade_settings.risk_per_trade_pct
+            risk_amount = account_balance * risk_pct
 
             logger.info(
                 "Risk check APPROVED for {strategy} {direction} @ {entry}: "
-                "position_size={size}, risk=${risk}",
+                "position_size={size}, risk=${risk}{hedge_note}",
                 strategy=candidate.strategy_name,
                 direction=candidate.direction.value,
                 entry=candidate.entry_price,
                 size=position_size,
                 risk=round(risk_amount, 2),
+                hedge_note=(
+                    f" (HEDGE: x{trade_settings.hedge_risk_multiplier} multiplier)"
+                    if is_hedge
+                    else ""
+                ),
             )
 
             results.append((

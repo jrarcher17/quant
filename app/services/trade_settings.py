@@ -20,6 +20,8 @@ class TradeSettingsPayload(BaseModel):
     min_confidence: float = Field(default=40.0, ge=0.0, le=100.0)
     max_concurrent_signals: int = Field(default=3, ge=1, le=20)
     daily_loss_limit_pct: float = Field(default=0.02, ge=0.001, le=0.50)
+    hedge_min_confidence: float = Field(default=100.0, ge=0.0, le=100.0)
+    hedge_risk_multiplier: float = Field(default=0.5, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def validate_targets(self) -> "TradeSettingsPayload":
@@ -40,6 +42,8 @@ def trade_settings_to_payload(settings: TradeSettings) -> TradeSettingsPayload:
         min_confidence=float(settings.min_confidence),
         max_concurrent_signals=int(settings.max_concurrent_signals),
         daily_loss_limit_pct=float(settings.daily_loss_limit_pct),
+        hedge_min_confidence=float(settings.hedge_min_confidence),
+        hedge_risk_multiplier=float(settings.hedge_risk_multiplier),
     )
 
 
@@ -75,6 +79,8 @@ async def update_trade_settings(
     settings.min_confidence = Decimal(str(payload.min_confidence))
     settings.max_concurrent_signals = payload.max_concurrent_signals
     settings.daily_loss_limit_pct = Decimal(str(payload.daily_loss_limit_pct))
+    settings.hedge_min_confidence = Decimal(str(payload.hedge_min_confidence))
+    settings.hedge_risk_multiplier = Decimal(str(payload.hedge_risk_multiplier))
 
     await session.commit()
     await session.refresh(settings)

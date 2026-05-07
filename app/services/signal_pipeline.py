@@ -16,7 +16,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from loguru import logger
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -27,7 +27,11 @@ from app.services.gold_intelligence import GoldIntelligence
 from app.services.risk_manager import RiskManager
 from app.services.signal_generator import SignalGenerator
 from app.services.strategy_selector import StrategySelector
+from app.services.trade_settings import get_trade_settings
 from app.strategies.helpers.indicators import compute_atr
+
+
+HEDGE_REASONING_TAG = "[HEDGE: opposite-direction override]"
 
 
 class SignalPipeline:
@@ -142,25 +146,71 @@ class SignalPipeline:
                 )
             validated = [best_candidate]
 
-            # 3d. Block opposite-direction signal if one is already active
-            active_stmt = (
-                select(Signal.direction)
-                .where(Signal.status == "active")
-                .limit(1)
+            # 3d. Opposite-direction handling.
+            #
+            # Historically the pipeline blocked any signal whose direction
+            # disagreed with an existing active signal. That made sense as a
+            # blunt safety rail but also meant the system couldn't fade an
+            # extended trend or take a high-conviction reversal.
+            #
+            # Now: only block if there's an active signal in the OPPOSITE
+            # direction AND the candidate's confidence falls below
+            # `hedge_min_confidence` (default 100.0 -> effectively disabled,
+            # preserving prior behaviour). Confidence at or above the
+            # threshold lets the signal through tagged as a HEDGE.
+            new_dir = validated[0].direction.value
+            opposite_dir = "SELL" if new_dir == "BUY" else "BUY"
+            opposite_count_stmt = (
+                select(func.count())
+                .select_from(Signal)
+                .where(
+                    and_(
+                        Signal.status == "active",
+                        Signal.direction == opposite_dir,
+                    )
+                )
             )
-            active_result = await session.execute(active_stmt)
-            active_dir = active_result.scalar_one_or_none()
-            if active_dir is not None:
-                new_dir = validated[0].direction.value
-                if new_dir != active_dir:
+            opposite_count = (
+                await session.execute(opposite_count_stmt)
+            ).scalar_one()
+
+            if opposite_count > 0:
+                trade_settings = await get_trade_settings(session)
+                threshold = float(trade_settings.hedge_min_confidence)
+                candidate_conf = float(validated[0].confidence)
+                if candidate_conf < threshold:
                     logger.info(
-                        "Blocking {} signal from '{}': active {} signal already open",
+                        "Blocking {} signal from '{}': "
+                        "{} active opposite-direction ({}) signal(s); "
+                        "confidence {:.1f} below hedge threshold {:.1f}",
                         new_dir,
                         strategy_name,
-                        active_dir,
+                        opposite_count,
+                        opposite_dir,
+                        candidate_conf,
+                        threshold,
                     )
                     validated = []
                     continue
+                logger.info(
+                    "Allowing HEDGE {} signal from '{}' over {} active {} "
+                    "signal(s): confidence {:.1f} >= threshold {:.1f}",
+                    new_dir,
+                    strategy_name,
+                    opposite_count,
+                    opposite_dir,
+                    candidate_conf,
+                    threshold,
+                )
+                hedge_candidate = validated[0].model_copy(
+                    update={
+                        "is_hedge": True,
+                        "reasoning": (
+                            validated[0].reasoning + " | " + HEDGE_REASONING_TAG
+                        ),
+                    }
+                )
+                validated = [hedge_candidate]
 
             # 3e. Risk check
             current_atr, baseline_atr = await self._compute_atr(session)

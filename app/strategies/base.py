@@ -40,6 +40,10 @@ class CandidateSignal(BaseModel):
     timestamp: datetime  # Candle timestamp that triggered the signal
     invalidation_price: Decimal | None = None
     session: str | None = None  # e.g. "london", "new_york", "asian"
+    # True when this candidate fired through the SignalPipeline's
+    # opposite-direction (hedge) override. Used by RiskManager to size
+    # hedges differently from primary signals.
+    is_hedge: bool = False
 
 
 class InsufficientDataError(Exception):
