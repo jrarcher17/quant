@@ -1071,6 +1071,11 @@
                 <input id="setting-hedge-risk-mult" name="hedge_risk_multiplier" type="number" min="0" max="1" step="0.05" required>
                 <div class="field-help">Fraction of normal risk applied to hedge signals. 0.5 = half size; 1.0 = same as primary signals.</div>
             </div>
+            <div class="settings-field">
+                <label for="setting-dedup-distance">Dedup Price Distance (pips)</label>
+                <input id="setting-dedup-distance" name="dedup_price_distance_pips" type="number" min="0" max="5000" step="1" required>
+                <div class="field-help">Suppresses a new signal if an active same-direction signal exists within this many pips of the proposed entry. 0 disables; 30 ≈ $3 on XAUUSD.</div>
+            </div>
         </div>
 
         <div class="modal-error" id="trade-settings-error"></div>
@@ -1736,6 +1741,7 @@ function fillTradeSettingsForm(settings) {
     document.getElementById('setting-daily-loss').value = formatNumber(finiteNumber(settings.daily_loss_limit_pct) * 100, 2);
     document.getElementById('setting-hedge-confidence').value = settings.hedge_min_confidence;
     document.getElementById('setting-hedge-risk-mult').value = settings.hedge_risk_multiplier;
+    document.getElementById('setting-dedup-distance').value = settings.dedup_price_distance_pips;
 }
 
 async function loadTradeSettings() {
@@ -1769,6 +1775,7 @@ function readTradeSettingsForm() {
         daily_loss_limit_pct: dailyLossPct,
         hedge_min_confidence: Number(document.getElementById('setting-hedge-confidence').value),
         hedge_risk_multiplier: Number(document.getElementById('setting-hedge-risk-mult').value),
+        dedup_price_distance_pips: Number(document.getElementById('setting-dedup-distance').value),
     };
 }
 

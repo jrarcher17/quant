@@ -22,6 +22,7 @@ class TradeSettingsPayload(BaseModel):
     daily_loss_limit_pct: float = Field(default=0.02, ge=0.001, le=0.50)
     hedge_min_confidence: float = Field(default=100.0, ge=0.0, le=100.0)
     hedge_risk_multiplier: float = Field(default=0.5, ge=0.0, le=1.0)
+    dedup_price_distance_pips: float = Field(default=30.0, ge=0.0, le=5000.0)
 
     @model_validator(mode="after")
     def validate_targets(self) -> "TradeSettingsPayload":
@@ -44,6 +45,7 @@ def trade_settings_to_payload(settings: TradeSettings) -> TradeSettingsPayload:
         daily_loss_limit_pct=float(settings.daily_loss_limit_pct),
         hedge_min_confidence=float(settings.hedge_min_confidence),
         hedge_risk_multiplier=float(settings.hedge_risk_multiplier),
+        dedup_price_distance_pips=float(settings.dedup_price_distance_pips),
     )
 
 
@@ -81,6 +83,9 @@ async def update_trade_settings(
     settings.daily_loss_limit_pct = Decimal(str(payload.daily_loss_limit_pct))
     settings.hedge_min_confidence = Decimal(str(payload.hedge_min_confidence))
     settings.hedge_risk_multiplier = Decimal(str(payload.hedge_risk_multiplier))
+    settings.dedup_price_distance_pips = Decimal(
+        str(payload.dedup_price_distance_pips)
+    )
 
     await session.commit()
     await session.refresh(settings)

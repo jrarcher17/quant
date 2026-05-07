@@ -7,7 +7,7 @@ Float math internally; Decimal(str(round(x, 2))) at persistence boundary only.
 from datetime import datetime, timedelta, timezone
 
 from loguru import logger
-from sqlalchemy import and_, select, update
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -302,11 +302,14 @@ class SignalGenerator:
                 continue
 
             # --- Filter 3: Dedup (SIG-05) ---
-            if await self._is_duplicate(session, candidate):
+            dup_reason = await self._is_duplicate(session, candidate)
+            if dup_reason is not None:
                 logger.info(
-                    "Signal suppressed: duplicate {} signal within {}h window",
+                    "Signal suppressed: duplicate {} {} @ {} -- {}",
                     candidate.direction.value,
-                    DEDUP_WINDOW_HOURS,
+                    candidate.symbol,
+                    candidate.entry_price,
+                    dup_reason,
                 )
                 continue
 
@@ -343,18 +346,38 @@ class SignalGenerator:
         self,
         session: AsyncSession,
         candidate: object,
-    ) -> bool:
-        """Check if an active signal with the same direction exists within the dedup window.
+    ) -> str | None:
+        """Check if a candidate is a duplicate of an existing signal.
+
+        Two checks run in order:
+
+        1. **Time-window dedup** -- a same-direction active signal created
+           within the last `DEDUP_WINDOW_HOURS` is treated as a burst
+           duplicate (catches back-to-back scheduler ticks even at
+           different price levels).
+        2. **Price-distance dedup** -- a same-direction active signal
+           whose entry price is within
+           `trade_settings.dedup_price_distance_pips * PIP_VALUE` of the
+           candidate's entry is treated as a positional duplicate. This
+           catches the common case where strategies re-fire on the same
+           recent candle across consecutive scheduler ticks; the entry
+           prices end up identical (or near-identical) and would
+           otherwise produce two parallel positions on the same setup.
+
+        The price-distance check is independent of time -- it stays in
+        force for as long as the existing signal is `active`.
 
         Args:
             session: Async database session.
-            candidate: CandidateSignal with symbol and direction attributes.
+            candidate: CandidateSignal with symbol, direction, and
+                entry_price attributes.
 
         Returns:
-            True if a duplicate active signal exists (suppress this candidate).
+            A short reason string if the candidate is a duplicate, or
+            `None` if the candidate is unique.
         """
+        # 1. Time-window dedup (existing behaviour).
         cutoff = datetime.now(timezone.utc) - timedelta(hours=DEDUP_WINDOW_HOURS)
-
         stmt = (
             select(Signal.id)
             .where(
@@ -367,8 +390,44 @@ class SignalGenerator:
             )
             .limit(1)
         )
-        result = await session.execute(stmt)
-        return result.scalar_one_or_none() is not None
+        if (await session.execute(stmt)).scalar_one_or_none() is not None:
+            return f"same direction within {DEDUP_WINDOW_HOURS}h window"
+
+        # 2. Price-distance dedup against any active same-direction signal.
+        trade_settings = await get_trade_settings(session)
+        distance_pips = float(trade_settings.dedup_price_distance_pips)
+        if distance_pips <= 0:
+            return None
+
+        # Keep the threshold as Decimal so the SQL comparison stays in
+        # numeric domain end-to-end (Signal.entry_price is Numeric(10,2)).
+        from decimal import Decimal as _Decimal
+
+        max_price_distance = _Decimal(str(round(distance_pips * PIP_VALUE, 2)))
+        stmt2 = (
+            select(Signal.entry_price)
+            .where(
+                and_(
+                    Signal.symbol == candidate.symbol,
+                    Signal.direction == candidate.direction.value,
+                    Signal.status == "active",
+                    func.abs(Signal.entry_price - candidate.entry_price)
+                    <= max_price_distance,
+                )
+            )
+            .limit(1)
+        )
+        nearest = (await session.execute(stmt2)).scalar_one_or_none()
+        if nearest is not None:
+            delta_pips = abs(
+                float(candidate.entry_price) - float(nearest)
+            ) / PIP_VALUE
+            return (
+                f"active same-direction signal at {nearest} "
+                f"({delta_pips:.1f} pips away, threshold {distance_pips:.1f})"
+            )
+
+        return None
 
     async def _check_directional_bias(
         self,

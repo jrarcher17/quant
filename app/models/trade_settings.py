@@ -52,6 +52,13 @@ class TradeSettings(Base):
     hedge_risk_multiplier: Mapped[Decimal] = mapped_column(
         Numeric(4, 3), nullable=False, default=Decimal("0.500")
     )
+    # Maximum distance (in XAUUSD pips) between an incoming candidate's
+    # entry and an existing active same-direction signal's entry below
+    # which the candidate is treated as a duplicate. 0 disables the check
+    # and falls back to time-window-only dedup.
+    dedup_price_distance_pips: Mapped[Decimal] = mapped_column(
+        Numeric(10, 2), nullable=False, default=Decimal("30.00")
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
