@@ -1,10 +1,11 @@
 """Signal pipeline orchestrator: the heartbeat of the trading system.
 
-Wires StrategySelector, SignalGenerator, RiskManager, and GoldIntelligence
-into a sequential flow that runs every hour:
+Wires StrategySelector, SignalGenerator, RiskManager, GoldIntelligence,
+and MacroBiasFilter into a sequential flow that runs every hour:
 
-    expire stale -> select strategy -> generate candidates ->
-    validate (R:R, confidence, dedup, bias) -> risk check ->
+    expire stale -> compute macro bias -> select strategy ->
+    generate candidates -> validate (R:R, confidence, dedup, bias) ->
+    apply macro bias adjustment -> risk check ->
     H4 confluence boost -> gold enrichment -> persist.
 
 Exports:
@@ -24,6 +25,7 @@ from app.models.candle import Candle
 from app.models.signal import Signal
 from app.models.strategy import Strategy as StrategyModel
 from app.services.gold_intelligence import GoldIntelligence
+from app.services.macro_filter import MacroBias, MacroBiasFilter
 from app.services.risk_manager import RiskManager
 from app.services.signal_generator import SignalGenerator
 from app.services.strategy_selector import StrategySelector
@@ -48,11 +50,13 @@ class SignalPipeline:
         generator: SignalGenerator,
         risk_manager: RiskManager,
         gold_intel: GoldIntelligence,
+        macro_filter: MacroBiasFilter | None = None,
     ) -> None:
         self.selector = selector
         self.generator = generator
         self.risk_manager = risk_manager
         self.gold_intel = gold_intel
+        self.macro_filter = macro_filter
 
     async def run(self, session: AsyncSession) -> list[Signal]:
         """Execute the full signal pipeline.
@@ -64,13 +68,15 @@ class SignalPipeline:
         Steps:
             1. Expire stale signals
             2. Rank all strategies
+            2.5. Compute macro bias (DXY trend + VIX risk-off, once per run)
             3. For each strategy (best first):
                a. Generate candidate signals
                b. Validate candidates (R:R, confidence, dedup, bias)
                c. Pick best candidate
-               d. Check opposite-direction block
-               e. Risk check
-               f. If approved -> proceed to enrichment & persist
+               d. Apply macro bias confidence adjustment (+5 aligned / -15 opposed)
+               e. Check opposite-direction block
+               f. Risk check
+               g. If approved -> proceed to enrichment & persist
             4. H4 confluence boost
             5. DXY correlation
             6. Gold intelligence enrichment
@@ -102,6 +108,17 @@ class SignalPipeline:
             len(ranked),
             regime.value,
         )
+
+        # 2.5. Compute macro bias once (DXY trend + VIX risk-off)
+        macro_bias: MacroBias | None = None
+        if self.macro_filter is not None:
+            macro_bias = await self.macro_filter.compute_bias(session)
+            logger.info(
+                "Macro bias: {} strength={:.1f} available={}",
+                macro_bias.direction.value,
+                macro_bias.strength,
+                macro_bias.available,
+            )
 
         # 3. Try each strategy in ranked order until one produces a signal
         validated = []
@@ -146,8 +163,20 @@ class SignalPipeline:
                 )
             validated = [best_candidate]
 
-            # 3d. Opposite-direction handling.
+            # 3d. Apply macro bias confidence adjustment.
             #
+            # When MacroBiasFilter is configured and macro data is available,
+            # aligned signals receive a small confidence boost (+5) and opposed
+            # signals receive a penalty (-15). The adjustment is non-blocking:
+            # it shifts confidence but never hard-rejects a candidate. The
+            # existing risk/validation gates remain the final arbiters.
+            if self.macro_filter is not None and macro_bias is not None:
+                validated = self.macro_filter.apply(validated, macro_bias)
+                best_candidate = validated[0]
+
+            # 3e. Opposite-direction handling.
+            #
+            # Note: macro bias has already been applied to `validated` above.
             # Historically the pipeline blocked any signal whose direction
             # disagreed with an existing active signal. That made sense as a
             # blunt safety rail but also meant the system couldn't fade an
@@ -212,7 +241,7 @@ class SignalPipeline:
                 )
                 validated = [hedge_candidate]
 
-            # 3e. Risk check
+            # 3f. Risk check
             current_atr, baseline_atr = await self._compute_atr(session)
             risk_results = await self.risk_manager.check(
                 session, validated,

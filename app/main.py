@@ -95,6 +95,43 @@ async def bootstrap_data() -> None:
                 except Exception:
                     logger.exception("Bootstrap: {} backfill failed", tf)
 
+        # Backfill DXY and VIX D1 candles for the macro bias filter.
+        # These are stored alongside gold candles in the same Candle table.
+        ingestor_macro = CandleIngestor(api_key=settings.twelve_data_api_key)
+        for macro_sym in ["DXY", "VIX"]:
+            result = await session.execute(
+                select(func.count()).select_from(Candle).where(
+                    Candle.symbol == macro_sym, Candle.timeframe == "D1"
+                )
+            )
+            macro_count = result.scalar() or 0
+            if macro_count < 30:
+                logger.info(
+                    "Bootstrap: backfilling {} D1 candles (have {})...",
+                    macro_sym,
+                    macro_count,
+                )
+                try:
+                    candles = await ingestor_macro.fetch_candles(
+                        macro_sym, "D1", outputsize=200
+                    )
+                    count = await ingestor_macro.upsert_candles(session, candles)
+                    logger.info(
+                        "Bootstrap: backfilled {} {} D1 candles",
+                        count,
+                        macro_sym,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Bootstrap: {} D1 backfill failed", macro_sym
+                    )
+            else:
+                logger.info(
+                    "Bootstrap: {} D1 candles OK ({} rows)",
+                    macro_sym,
+                    macro_count,
+                )
+
     # --- Step 3: Run backtests if none exist ---
     async with async_session_factory() as session:
         result = await session.execute(

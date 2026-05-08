@@ -14,6 +14,7 @@ from loguru import logger
 from app.workers.jobs import (
     check_outcomes,
     refresh_candles,
+    refresh_macro_symbols,
     run_daily_backtests,
     run_data_retention,
     run_param_optimization,
@@ -88,6 +89,15 @@ def register_jobs() -> None:
     logger.info("Registered job: refresh_candles_D1 (daily at 00:01 UTC)")
 
     scheduler.add_job(
+        refresh_macro_symbols,
+        trigger=CronTrigger(hour=0, minute=5, timezone="UTC"),
+        id="refresh_macro_symbols",
+        name="Refresh DXY/VIX macro candles",
+        replace_existing=True,
+    )
+    logger.info("Registered job: refresh_macro_symbols (daily at 00:05 UTC)")
+
+    scheduler.add_job(
         run_daily_backtests,
         trigger=CronTrigger(hour="1,5,9,13,17,21", minute=0, timezone="UTC"),
         id="run_daily_backtests",
@@ -143,4 +153,4 @@ def register_jobs() -> None:
     )
     logger.info("Registered job: send_health_digest (daily at 06:00 UTC)")
 
-    logger.info("All {count} jobs registered", count=10)
+    logger.info("All {count} jobs registered", count=11)

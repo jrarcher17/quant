@@ -356,6 +356,63 @@ async def run_daily_backtests() -> None:
         logger.exception("run_daily_backtests failed")
 
 
+async def refresh_macro_symbols() -> None:
+    """Fetch and store DXY and VIX D1 candles for macro bias computation.
+
+    Executed daily at 00:05 UTC (just after the main D1 refresh at 00:01).
+    Both symbols are stored in the same Candle table with their respective
+    symbol values ("DXY", "VIX"). Failures for individual symbols are caught
+    and logged without stopping the other symbol or crashing the scheduler.
+
+    Creates its own database session. All exceptions are caught at the top
+    level to prevent scheduler crashes.
+    """
+    job_id = "refresh_macro_symbols"
+    try:
+        settings = get_settings()
+        ingestor = CandleIngestor(api_key=settings.twelve_data_api_key)
+
+        async with async_session_factory() as session:
+            total = 0
+            for symbol in ["DXY", "VIX"]:
+                try:
+                    count = await ingestor.fetch_and_store(
+                        session, symbol, "D1", outputsize=200
+                    )
+                    total += count
+                    logger.info(
+                        "refresh_macro_symbols: {} D1 stored={}",
+                        symbol,
+                        count,
+                    )
+                except Exception:
+                    logger.exception(
+                        "refresh_macro_symbols: failed for symbol={}",
+                        symbol,
+                    )
+
+            logger.info(
+                "refresh_macro_symbols complete | total_stored={}",
+                total,
+            )
+
+        FailureTracker.record_success(job_id)
+
+    except Exception as exc:
+        logger.exception("refresh_macro_symbols failed")
+        count = FailureTracker.record_failure(job_id)
+        if FailureTracker.should_alert(job_id):
+            settings = get_settings()
+            err_type = type(exc).__name__
+            err_msg = str(exc)[:200]
+            await _notify_system_alert(
+                settings,
+                "Macro Symbol Refresh Failing",
+                f"DXY/VIX refresh has failed {count} consecutive times\n\n"
+                f"<b>Error:</b> {err_type}: {err_msg}",
+            )
+
+
 async def run_signal_scanner() -> None:
     """Run the signal pipeline to scan for new trade signals.
 
@@ -371,6 +428,7 @@ async def run_signal_scanner() -> None:
         from app.services.signal_generator import SignalGenerator
         from app.services.risk_manager import RiskManager
         from app.services.gold_intelligence import GoldIntelligence
+        from app.services.macro_filter import MacroBiasFilter
         from app.services.signal_pipeline import SignalPipeline
 
         async with async_session_factory() as session:
@@ -380,8 +438,12 @@ async def run_signal_scanner() -> None:
             generator = SignalGenerator()
             risk_manager = RiskManager()
             gold_intel = GoldIntelligence()
+            macro_filter = MacroBiasFilter()
 
-            pipeline = SignalPipeline(selector, generator, risk_manager, gold_intel)
+            pipeline = SignalPipeline(
+                selector, generator, risk_manager, gold_intel,
+                macro_filter=macro_filter,
+            )
             signals = await pipeline.run(session)
 
             # Send notifications for new signals (fire-and-forget)
