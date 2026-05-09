@@ -1,4 +1,4 @@
-# QuantLive — GoldSignal
+# QuantConnect
 
 An autonomous gold (XAUUSD) trading signal system built with FastAPI, PostgreSQL, and Twelve Data. It ingests price candles, runs rule-based strategies through a backtester and signal pipeline, tracks live outcomes, and can deliver high-conviction alerts to Telegram.
 
@@ -30,8 +30,8 @@ An autonomous gold (XAUUSD) trading signal system built with FastAPI, PostgreSQL
 
 ```bash
 # 1. Clone
-git clone https://github.com/vaughanf1/QuantLive.git
-cd QuantLive
+git clone https://github.com/vaughanf1/QuantConnect.git
+cd QuantConnect
 
 # 2. Create and activate a virtualenv
 python3.12 -m venv .venv
@@ -106,7 +106,7 @@ BETTER_AUTH_SECRET=replace_with_npx_auth_secret
 BETTER_AUTH_URL=http://127.0.0.1:8080
 AUTH_PORT=3000
 AUTH_SERVICE_URL=http://127.0.0.1:3000
-BETTER_AUTH_SEED_USERS=admin@example.com:change-this-password:QuantLive Admin
+BETTER_AUTH_SEED_USERS=admin@example.com:change-this-password:QuantConnect Admin
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 DIDWW_SMS_USERNAME=
@@ -120,8 +120,8 @@ DIDWW_SMS_ENDPOINT=https://sms-out.didww.com
 ## Run with Docker
 
 ```bash
-docker build -t quantlive .
-docker run --rm -p 8080:8080 --env-file .env quantlive
+docker build -t quantconnect .
+docker run --rm -p 8080:8080 --env-file .env quantconnect
 ```
 
 The container runs Alembic, Better Auth migrations, the optional seed script, the Better Auth service on `127.0.0.1:3000`, and then uvicorn on port 8080.

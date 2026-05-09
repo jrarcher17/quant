@@ -170,18 +170,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Start background scheduler and register candle refresh jobs
     scheduler.start()
     register_jobs()
-    logger.info("GoldSignal application started")
+    logger.info("QuantConnect application started")
 
     yield
 
     # Graceful shutdown
     scheduler.shutdown(wait=False)
     await engine.dispose()
-    logger.info("GoldSignal application stopped")
+    logger.info("QuantConnect application stopped")
 
 
 app = FastAPI(
-    title="GoldSignal",
+    title="QuantConnect",
     version="0.1.0",
     lifespan=lifespan,
 )

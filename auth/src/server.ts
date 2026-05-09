@@ -25,5 +25,5 @@ app.get("/api/auth-health", (_req, res) => {
 });
 
 app.listen(port, "127.0.0.1", () => {
-  console.log(`QuantLive auth service listening on 127.0.0.1:${port}`);
+  console.log(`QuantConnect auth service listening on 127.0.0.1:${port}`);
 });
