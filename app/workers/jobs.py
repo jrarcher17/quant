@@ -21,9 +21,9 @@ from app.models.signal import Signal
 from app.models.strategy import Strategy as StrategyModel
 from app.services.candle_ingestor import CandleIngestor
 from app.services.data_retention import DataRetentionService
-from app.services.didww_sms_notifier import DidwwSmsNotifier
 from app.services.failure_tracker import FailureTracker
 from app.services.outcome_detector import OutcomeDetector
+from app.services.signal_notifier import SignalNotifier
 from app.services.telegram_notifier import TelegramNotifier
 
 
@@ -35,34 +35,30 @@ def _telegram_notifier(settings) -> TelegramNotifier:
     )
 
 
-def _sms_notifier(settings) -> DidwwSmsNotifier:
-    """Build the configured DIDWW SMS notifier."""
-    return DidwwSmsNotifier(
-        username=settings.didww_sms_username,
-        password=settings.didww_sms_password,
-        source=settings.didww_sms_from,
-        destinations=settings.didww_sms_to,
-        campaign_id=settings.didww_sms_campaign_id,
-        endpoint=settings.didww_sms_endpoint,
+def _signal_notifier(settings) -> SignalNotifier:
+    """Build the configured Signal (CallMeBot) notifier."""
+    return SignalNotifier(
+        phone=settings.signal_phone,
+        api_key=settings.signal_api_key,
     )
 
 
 async def _notify_system_alert(settings, title: str, details: str) -> None:
     """Send operational alerts to all configured notification channels."""
     await _telegram_notifier(settings).notify_system_alert(title, details)
-    await _sms_notifier(settings).notify_system_alert(title, details)
+    await _signal_notifier(settings).notify_system_alert(title, details)
 
 
 async def _notify_signal(settings, signal: Signal, strategy_name: str) -> None:
     """Send signal alerts to all configured notification channels."""
     await _telegram_notifier(settings).notify_signal(signal, strategy_name=strategy_name)
-    await _sms_notifier(settings).notify_signal(signal, strategy_name=strategy_name)
+    await _signal_notifier(settings).notify_signal(signal, strategy_name=strategy_name)
 
 
 async def _notify_outcome(settings, signal: Signal, outcome) -> None:
     """Send outcome alerts to all configured notification channels."""
     await _telegram_notifier(settings).notify_outcome(signal, outcome)
-    await _sms_notifier(settings).notify_outcome(signal, outcome)
+    await _signal_notifier(settings).notify_outcome(signal, outcome)
 
 
 async def _notify_degradation(
@@ -77,7 +73,7 @@ async def _notify_degradation(
         reason,
         is_recovery=is_recovery,
     )
-    await _sms_notifier(settings).notify_degradation(
+    await _signal_notifier(settings).notify_degradation(
         strategy_name,
         reason,
         is_recovery=is_recovery,

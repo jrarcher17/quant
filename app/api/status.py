@@ -417,6 +417,82 @@ async def signal_diagnostic():
     return results
 
 
+@router.delete("/debug/clear-all-signals")
+async def debug_clear_all_signals(
+    session: AsyncSession = Depends(get_session),
+):
+    """Permanently delete all signals and their linked outcomes.
+
+    Deletes outcomes first (FK constraint), then signals. Use this for a
+    full clean slate. Backtest results, strategy performance, and candle
+    data are NOT affected.
+
+    Returns the counts of deleted outcomes and signals.
+    """
+    try:
+        from sqlalchemy import delete
+
+        from app.models.outcome import Outcome
+
+        # Outcomes must be deleted first due to FK constraint on signals.id
+        outcome_del = await session.execute(delete(Outcome))
+        outcomes_deleted = outcome_del.rowcount
+
+        signal_del = await session.execute(delete(Signal))
+        signals_deleted = signal_del.rowcount
+
+        await session.commit()
+
+        logger.info(
+            "debug_clear_all_signals: deleted {} outcome(s) and {} signal(s)",
+            outcomes_deleted,
+            signals_deleted,
+        )
+        return {
+            "status": "ok",
+            "outcomes_deleted": outcomes_deleted,
+            "signals_deleted": signals_deleted,
+        }
+
+    except Exception as exc:
+        logger.exception("debug_clear_all_signals failed")
+        return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+
+
+@router.post("/debug/expire-all-signals")
+async def debug_expire_all_signals(
+    session: AsyncSession = Depends(get_session),
+):
+    """Expire all currently active signals immediately.
+
+    Marks every signal with status='active' as status='expired'. This does
+    NOT delete any rows -- historical data, outcomes, and strategy performance
+    metrics are fully preserved. Use this to reset the active signal queue
+    for a clean start without losing backtest or outcome history.
+
+    Returns the number of signals expired.
+    """
+    try:
+        from sqlalchemy import update
+
+        result = await session.execute(
+            update(Signal)
+            .where(Signal.status == "active")
+            .values(status="expired")
+            .returning(Signal.id)
+        )
+        expired_ids = result.scalars().all()
+        await session.commit()
+
+        count = len(expired_ids)
+        logger.info("debug_expire_all_signals: expired {} active signal(s)", count)
+        return {"status": "ok", "expired_count": count, "expired_ids": list(expired_ids)}
+
+    except Exception as exc:
+        logger.exception("debug_expire_all_signals failed")
+        return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+
+
 @router.post("/trigger/{job_name}")
 async def trigger_job(job_name: str):
     """Manually trigger a job and return the result or error.

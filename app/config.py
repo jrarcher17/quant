@@ -45,13 +45,10 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
-    # DIDWW SMS (optional -- system works without these configured)
-    didww_sms_username: str = ""
-    didww_sms_password: str = ""
-    didww_sms_from: str = ""
-    didww_sms_to: str = ""
-    didww_sms_campaign_id: str = ""
-    didww_sms_endpoint: str = "https://sms-out.didww.com"
+    # Signal messenger via CallMeBot (optional -- system works without these)
+    # Setup: add +34 644 52 74 88 on Signal and send "I allow callmebot to send me messages"
+    signal_phone: str = ""
+    signal_api_key: str = ""
 
     @model_validator(mode="after")
     def normalize_database_url(self) -> "Settings":
