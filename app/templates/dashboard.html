@@ -283,20 +283,74 @@
             margin-bottom: 24px;
         }
 
-        .dashboard-top-grid {
-            display: grid;
-            grid-template-columns: minmax(0, 7fr) minmax(280px, 3fr);
-            gap: 16px;
-            margin-bottom: 24px;
-        }
-
         .chart-card {
-            min-height: 430px;
+            margin-bottom: 24px;
         }
 
         .chart-container {
             width: 100%;
-            height: 374px;
+            height: 480px;
+        }
+
+        /* === TABS === */
+        .tabs-card {
+            margin-bottom: 24px;
+        }
+
+        .tabs-header {
+            padding: 0 20px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 0;
+            overflow-x: auto;
+        }
+
+        .tab-btn {
+            padding: 14px 18px;
+            background: transparent;
+            border: none;
+            border-bottom: 2px solid transparent;
+            color: var(--text-dim);
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all 0.2s ease;
+            margin-bottom: -1px;
+        }
+
+        .tab-btn:hover {
+            color: var(--text-secondary);
+        }
+
+        .tab-btn.active {
+            color: var(--accent);
+            border-bottom-color: var(--accent);
+        }
+
+        .tab-badge {
+            display: inline-block;
+            font-size: 10px;
+            font-weight: 600;
+            padding: 2px 6px;
+            border-radius: 100px;
+            font-family: 'JetBrains Mono', monospace;
+            background: var(--accent-dim);
+            color: var(--accent);
+            margin-left: 6px;
+            vertical-align: middle;
+        }
+
+        .tab-panel {
+            display: none;
+        }
+
+        .tab-panel.active {
+            display: block;
         }
 
         .chart-header-main {
@@ -707,7 +761,7 @@
         /* === RESPONSIVE === */
         @media (max-width: 1200px) {
             .stats-row { grid-template-columns: repeat(3, 1fr); }
-            .grid-2, .grid-3-1, .dashboard-top-grid { grid-template-columns: 1fr; }
+            .grid-2, .grid-3-1 { grid-template-columns: 1fr; }
         }
 
         @media (max-width: 768px) {
@@ -715,7 +769,7 @@
             .header { padding: 14px 16px; flex-wrap: wrap; gap: 12px; }
             .content { padding: 16px; }
             .card-header { align-items: flex-start; gap: 12px; flex-direction: column; }
-            .chart-container { height: 320px; }
+            .chart-container { height: 360px; }
             .settings-grid { grid-template-columns: 1fr; }
         }
 
@@ -810,45 +864,90 @@
             </div>
         </div>
 
-        <!-- CHART + STRATEGIES -->
-        <div class="dashboard-top-grid">
-            <div class="card chart-card">
-                <div class="card-header">
-                    <div class="chart-header-main">
-                        <div class="card-title" id="chart-title">{{ symbol }} H1 Chart</div>
-                        <div class="chart-controls" aria-label="Chart controls">
-                            <select class="chart-control" id="chart-timeframe" aria-label="Candle timeframe">
-                                <option value="M15">15m candles</option>
-                                <option value="H1" selected>1h candles</option>
-                                <option value="H4">4h candles</option>
-                                <option value="D1">1d candles</option>
-                            </select>
-                            <select class="chart-control" id="chart-range" aria-label="Chart range">
-                                <option value="0.5">12h</option>
-                                <option value="1">1d</option>
-                                <option value="3">3d</option>
-                                <option value="7">1w</option>
-                                <option value="14" selected>2w</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="chart-legend">
-                        <div class="legend-item"><span class="legend-dot" style="background: #3179F5;"></span>Active</div>
-                        <div class="legend-item"><span class="legend-dot" style="background: #26a69a;"></span>TP</div>
-                        <div class="legend-item"><span class="legend-dot" style="background: #ef5350;"></span>SL</div>
-                        <div class="legend-item">refresh 30s</div>
+        <!-- CHART (full width) -->
+        <div class="card chart-card">
+            <div class="card-header">
+                <div class="chart-header-main">
+                    <div class="card-title" id="chart-title">{{ symbol }} H1 Chart</div>
+                    <div class="chart-controls" aria-label="Chart controls">
+                        <select class="chart-control" id="chart-timeframe" aria-label="Candle timeframe">
+                            <option value="M15">15m candles</option>
+                            <option value="H1" selected>1h candles</option>
+                            <option value="H4">4h candles</option>
+                            <option value="D1">1d candles</option>
+                        </select>
+                        <select class="chart-control" id="chart-range" aria-label="Chart range">
+                            <option value="0.5">12h</option>
+                            <option value="1">1d</option>
+                            <option value="3">3d</option>
+                            <option value="7">1w</option>
+                            <option value="14" selected>2w</option>
+                        </select>
                     </div>
                 </div>
-                <div class="card-body" style="padding: 0;">
-                    <div id="chart-container" class="chart-container"></div>
+                <div class="chart-legend">
+                    <div class="legend-item"><span class="legend-dot" style="background: #3179F5;"></span>Active</div>
+                    <div class="legend-item"><span class="legend-dot" style="background: #26a69a;"></span>TP</div>
+                    <div class="legend-item"><span class="legend-dot" style="background: #ef5350;"></span>SL</div>
+                    <div class="legend-item">refresh 30s</div>
+                </div>
+            </div>
+            <div class="card-body" style="padding: 0;">
+                <div id="chart-container" class="chart-container"></div>
+            </div>
+        </div>
+
+        <!-- TABBED PANEL: Recent Signals / Strategies / Backtest / Walk-Forward / Optimized Params -->
+        <div class="card tabs-card">
+            <div class="tabs-header" role="tablist">
+                <button class="tab-btn active" role="tab" aria-selected="true" aria-controls="tab-signals" data-tab="signals">
+                    Recent Signals<span class="tab-badge" id="signal-count">0</span>
+                </button>
+                <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-strategies" data-tab="strategies">
+                    Strategies<span class="tab-badge" id="strategy-count">0</span>
+                </button>
+                <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-backtest" data-tab="backtest">
+                    Backtest Results<span class="tab-badge" id="bt-total" style="background: var(--accent-dim); color: var(--accent);">0</span>
+                </button>
+                <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-walkforward" data-tab="walkforward">
+                    Walk-Forward Validation
+                </button>
+                <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-optimized" data-tab="optimized">
+                    Optimized Parameters
+                </button>
+            </div>
+
+            <!-- Recent Signals -->
+            <div id="tab-signals" class="tab-panel active" role="tabpanel">
+                <div style="padding: 0; overflow-x: auto;">
+                    <table class="table" id="signals-table">
+                        <thead>
+                            <tr>
+                                <th>Dir</th>
+                                <th>Entry</th>
+                                <th>SL</th>
+                                <th>TP1</th>
+                                <th>TP2</th>
+                                <th>R:R</th>
+                                <th>Conf</th>
+                                <th>Strategy</th>
+                                <th>Result</th>
+                                <th>P&L</th>
+                                <th>Time</th>
+                            </tr>
+                        </thead>
+                        <tbody id="signals-body">
+                        </tbody>
+                    </table>
+                    <div class="empty-state" id="signals-empty" style="display: none;">
+                        <div class="icon">~</div>
+                        Awaiting first signal...
+                    </div>
                 </div>
             </div>
 
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-title">Strategies</div>
-                    <div class="card-badge green" id="strategy-count">0</div>
-                </div>
+            <!-- Strategies -->
+            <div id="tab-strategies" class="tab-panel" role="tabpanel">
                 <div class="card-body" id="strategies-body">
                     <div class="empty-state" id="strategies-empty">
                         <div class="icon">~</div>
@@ -856,79 +955,37 @@
                     </div>
                 </div>
             </div>
-        </div>
 
-        <!-- RECENT SIGNALS -->
-        <div class="card" style="margin-bottom: 24px;">
-            <div class="card-header">
-                <div class="card-title">Recent Signals</div>
-                <div class="card-badge green" id="signal-count">0</div>
-            </div>
-            <div class="card-body" style="padding: 0; overflow-x: auto;">
-                <table class="table" id="signals-table">
-                    <thead>
-                        <tr>
-                            <th>Dir</th>
-                            <th>Entry</th>
-                            <th>SL</th>
-                            <th>TP1</th>
-                            <th>TP2</th>
-                            <th>R:R</th>
-                            <th>Conf</th>
-                            <th>Strategy</th>
-                            <th>Result</th>
-                            <th>P&L</th>
-                            <th>Time</th>
-                        </tr>
-                    </thead>
-                    <tbody id="signals-body">
-                    </tbody>
-                </table>
-                <div class="empty-state" id="signals-empty" style="display: none;">
-                    <div class="icon">~</div>
-                    Awaiting first signal...
+            <!-- Backtest Results -->
+            <div id="tab-backtest" class="tab-panel" role="tabpanel">
+                <div style="padding: 0; overflow-x: auto;">
+                    <table class="table" id="bt-table">
+                        <thead>
+                            <tr>
+                                <th>Strategy</th>
+                                <th>Window</th>
+                                <th>Win Rate</th>
+                                <th>Profit Factor</th>
+                                <th>Sharpe</th>
+                                <th>Max DD (pips)</th>
+                                <th>Expectancy</th>
+                                <th>Trades</th>
+                                <th>Last Run</th>
+                            </tr>
+                        </thead>
+                        <tbody id="bt-body">
+                        </tbody>
+                    </table>
+                    <div class="empty-state" id="bt-empty" style="display: none;">
+                        <div class="icon">~</div>
+                        No backtest results yet — first run at next scheduled cycle
+                    </div>
                 </div>
             </div>
-        </div>
 
-        <!-- BACKTEST RESULTS -->
-        <div class="card" style="margin-bottom: 24px;">
-            <div class="card-header">
-                <div class="card-title">Backtest Results</div>
-                <div class="card-badge accent" id="bt-total" style="background: var(--accent-dim); color: var(--accent);">0 total</div>
-            </div>
-            <div class="card-body" style="padding: 0; overflow-x: auto;">
-                <table class="table" id="bt-table">
-                    <thead>
-                        <tr>
-                            <th>Strategy</th>
-                            <th>Window</th>
-                            <th>Win Rate</th>
-                            <th>Profit Factor</th>
-                            <th>Sharpe</th>
-                            <th>Max DD (pips)</th>
-                            <th>Expectancy</th>
-                            <th>Trades</th>
-                            <th>Last Run</th>
-                        </tr>
-                    </thead>
-                    <tbody id="bt-body">
-                    </tbody>
-                </table>
-                <div class="empty-state" id="bt-empty" style="display: none;">
-                    <div class="icon">~</div>
-                    No backtest results yet — first run at next scheduled cycle
-                </div>
-            </div>
-        </div>
-
-        <!-- WALK-FORWARD & OPTIMIZATION -->
-        <div class="grid-2">
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-title">Walk-Forward Validation</div>
-                </div>
-                <div class="card-body" style="padding: 0; overflow-x: auto;">
+            <!-- Walk-Forward Validation -->
+            <div id="tab-walkforward" class="tab-panel" role="tabpanel">
+                <div style="padding: 0; overflow-x: auto;">
                     <table class="table" id="wf-table">
                         <thead>
                             <tr>
@@ -951,11 +1008,9 @@
                 </div>
             </div>
 
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-title">Optimized Parameters</div>
-                </div>
-                <div class="card-body" style="padding: 0; overflow-x: auto;">
+            <!-- Optimized Parameters -->
+            <div id="tab-optimized" class="tab-panel" role="tabpanel">
+                <div style="padding: 0; overflow-x: auto;">
                     <table class="table" id="opt-table">
                         <thead>
                             <tr>
@@ -1587,7 +1642,7 @@ async function refreshDashboard() {
 
         // --- Backtest results ---
         const bt = data.backtests || {};
-        document.getElementById('bt-total').textContent = `${formatCount(bt.total)} total`;
+        document.getElementById('bt-total').textContent = formatCount(bt.total);
         const btBody = document.getElementById('bt-body');
         const btEmpty = document.getElementById('bt-empty');
         const btResults = Array.isArray(bt.results) ? bt.results : [];
@@ -1816,6 +1871,27 @@ tradeSettingsForm.addEventListener('submit', async (event) => {
         tradeSettingsSave.textContent = 'Save Settings';
     }
 });
+
+// ============================
+// TAB SWITCHING
+// ============================
+(function initTabs() {
+    const tabBtns = document.querySelectorAll('.tab-btn[data-tab]');
+    tabBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            const target = btn.dataset.tab;
+            tabBtns.forEach(b => {
+                b.classList.remove('active');
+                b.setAttribute('aria-selected', 'false');
+            });
+            document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+            btn.classList.add('active');
+            btn.setAttribute('aria-selected', 'true');
+            const panel = document.getElementById(`tab-${target}`);
+            if (panel) panel.classList.add('active');
+        });
+    });
+})();
 
 // Initial load
 refreshDashboard();
