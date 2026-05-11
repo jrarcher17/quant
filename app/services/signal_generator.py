@@ -20,10 +20,13 @@ from app.services.trade_settings import get_trade_settings
 # ---------------------------------------------------------------------------
 
 MIN_RR: float = 1.3  # Minimum risk:reward ratio (1:1.3)
-MIN_CONFIDENCE: float = 40.0  # Minimum confidence threshold (%)
+MIN_CONFIDENCE: float = 60.0  # Minimum confidence threshold (%)
 MAX_SL_PIPS: float = 800.0  # Max stop loss distance (pips); ~$80 ≈ 1.5% at XAU $5,300
 PIP_VALUE: float = 0.10  # XAUUSD: $0.10 price movement per pip
-DEDUP_WINDOW_HOURS: int = 1  # Same-direction dedup window (hours)
+DEDUP_WINDOW_HOURS: int = 2  # Same-direction dedup window (hours)
+# Statuses counted for dedup — includes closed signals to prevent re-entry
+# into the same direction immediately after a loss
+DEDUP_STATUSES: tuple[str, ...] = ("active", "sl_hit", "tp_hit", "expired")
 EXPIRY_HOURS: dict[str, int] = {
     "M15": 4,   # Scalp: 4 hours
     "H1": 8,    # Intraday: 8 hours
@@ -31,6 +34,11 @@ EXPIRY_HOURS: dict[str, int] = {
     "D1": 48,   # Swing: 48 hours
 }
 BIAS_WINDOW_SIGNALS: int = 20  # Number of recent signals to check for bias
+
+# Per-strategy safety limits
+MAX_SIGNALS_PER_STRATEGY_DAY: int = 2     # Max signals per strategy per calendar day
+STRATEGY_LOSS_STREAK_LIMIT: int = 3       # Consecutive SL hits that trigger cooldown
+STRATEGY_COOLDOWN_HOURS: int = 4          # Hours to block a strategy after streak
 BIAS_SKEW_THRESHOLD: float = 0.75  # >75% same direction flags bias
 
 
@@ -158,11 +166,15 @@ class SignalGenerator:
         # stale -- the market has moved, so the outcome detector would
         # instantly trigger TP/SL. Only accept signals from the last 3 bars.
         if candidates:
-            # Staleness cutoff: 3x the timeframe interval
+            # Staleness cutoff: 2x the timeframe interval (was 3x).
+            # Strategies scan a full lookback window and can emit signals for
+            # historical bars. Keeping only the last 2 bars' worth of signals
+            # ensures the entry price is still actionable and avoids immediately
+            # triggering TP/SL on a stale setup.
             tf_hours = {"M15": 0.25, "H1": 1, "H4": 4, "D1": 24}
             interval_hours = tf_hours.get(primary_tf, 1)
             staleness_cutoff = datetime.now(timezone.utc) - timedelta(
-                hours=interval_hours * 3
+                hours=interval_hours * 2
             )
 
             fresh = []
@@ -270,6 +282,32 @@ class SignalGenerator:
         trade_settings = await get_trade_settings(session)
 
         for candidate in candidates:
+            # --- Filter 0: SL direction sanity check ---
+            # BUY: SL must be strictly below entry; SELL: SL must be strictly above.
+            # A reversed SL causes the outcome detector to fire immediately and
+            # indicates a strategy calculation error for this specific bar.
+            entry_f = float(candidate.entry_price)
+            sl_f = float(candidate.stop_loss)
+            direction_str = candidate.direction.value
+            if direction_str == "BUY" and sl_f >= entry_f:
+                logger.warning(
+                    "Signal rejected: BUY SL {:.2f} >= entry {:.2f} "
+                    "(inverted stop) from '{}'",
+                    sl_f,
+                    entry_f,
+                    candidate.strategy_name,
+                )
+                continue
+            if direction_str == "SELL" and sl_f <= entry_f:
+                logger.warning(
+                    "Signal rejected: SELL SL {:.2f} <= entry {:.2f} "
+                    "(inverted stop) from '{}'",
+                    sl_f,
+                    entry_f,
+                    candidate.strategy_name,
+                )
+                continue
+
             # --- Filter 1: R:R threshold (SIG-03) ---
             rr = float(candidate.risk_reward)
             if rr < trade_settings.min_risk_reward:
@@ -310,6 +348,28 @@ class SignalGenerator:
                     candidate.symbol,
                     candidate.entry_price,
                     dup_reason,
+                )
+                continue
+
+            # --- Filter 3b: Per-strategy daily cap ---
+            daily_limit_reason = await self._check_daily_strategy_limit(
+                session, candidate
+            )
+            if daily_limit_reason is not None:
+                logger.info(
+                    "Signal suppressed: daily limit for '{}' -- {}",
+                    candidate.strategy_name,
+                    daily_limit_reason,
+                )
+                continue
+
+            # --- Filter 3c: Per-strategy consecutive-loss cooldown ---
+            cooldown_reason = await self._check_strategy_cooldown(session, candidate)
+            if cooldown_reason is not None:
+                logger.info(
+                    "Signal suppressed: strategy cooldown for '{}' -- {}",
+                    candidate.strategy_name,
+                    cooldown_reason,
                 )
                 continue
 
@@ -376,7 +436,12 @@ class SignalGenerator:
             A short reason string if the candidate is a duplicate, or
             `None` if the candidate is unique.
         """
-        # 1. Time-window dedup (existing behaviour).
+        # 1. Time-window dedup.
+        #
+        # Covers ALL resolved statuses (sl_hit, tp_hit, expired) in addition to
+        # active signals so that a strategy cannot immediately re-enter the same
+        # direction after a stop-out. Without this, the outcome detector (90s poll)
+        # closes signal N before the next scanner tick, making dedup invisible to N+1.
         cutoff = datetime.now(timezone.utc) - timedelta(hours=DEDUP_WINDOW_HOURS)
         stmt = (
             select(Signal.id)
@@ -384,14 +449,14 @@ class SignalGenerator:
                 and_(
                     Signal.symbol == candidate.symbol,
                     Signal.direction == candidate.direction.value,
-                    Signal.status == "active",
+                    Signal.status.in_(list(DEDUP_STATUSES)),
                     Signal.created_at >= cutoff,
                 )
             )
             .limit(1)
         )
         if (await session.execute(stmt)).scalar_one_or_none() is not None:
-            return f"same direction within {DEDUP_WINDOW_HOURS}h window"
+            return f"same direction within {DEDUP_WINDOW_HOURS}h window (any status)"
 
         # 2. Price-distance dedup against any active same-direction signal.
         trade_settings = await get_trade_settings(session)
@@ -427,6 +492,109 @@ class SignalGenerator:
                 f"({delta_pips:.1f} pips away, threshold {distance_pips:.1f})"
             )
 
+        return None
+
+    async def _check_daily_strategy_limit(
+        self,
+        session: AsyncSession,
+        candidate: object,
+    ) -> str | None:
+        """Enforce a per-strategy daily signal cap.
+
+        Counts all signals (any status) generated today by the same strategy.
+        If the count has already reached MAX_SIGNALS_PER_STRATEGY_DAY, the
+        candidate is rejected to prevent a single strategy from flooding
+        the signal feed on a single calendar day.
+
+        Args:
+            session: Async database session.
+            candidate: CandidateSignal with strategy_name attribute.
+
+        Returns:
+            A short reason string if the cap is reached, or None if under limit.
+        """
+        from app.models.strategy import Strategy
+
+        today_midnight = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+
+        stmt = (
+            select(func.count())
+            .select_from(Signal)
+            .join(Strategy, Strategy.id == Signal.strategy_id)
+            .where(
+                and_(
+                    Strategy.name == candidate.strategy_name,
+                    Signal.created_at >= today_midnight,
+                )
+            )
+        )
+        count = (await session.execute(stmt)).scalar_one()
+
+        if count >= MAX_SIGNALS_PER_STRATEGY_DAY:
+            return (
+                f"{count} signals already generated today "
+                f"(limit={MAX_SIGNALS_PER_STRATEGY_DAY})"
+            )
+        return None
+
+    async def _check_strategy_cooldown(
+        self,
+        session: AsyncSession,
+        candidate: object,
+    ) -> str | None:
+        """Block a strategy that has hit consecutive stop-losses recently.
+
+        If the last STRATEGY_LOSS_STREAK_LIMIT outcomes for this strategy are
+        all sl_hit AND the most recent one occurred within STRATEGY_COOLDOWN_HOURS,
+        the strategy is placed in a temporary cool-down to prevent it from
+        repeatedly re-entering a losing market condition.
+
+        Args:
+            session: Async database session.
+            candidate: CandidateSignal with strategy_name attribute.
+
+        Returns:
+            A short reason string if in cooldown, or None if clear.
+        """
+        from app.models.outcome import Outcome
+        from app.models.strategy import Strategy
+
+        stmt = (
+            select(Outcome.result, Outcome.created_at)
+            .join(Signal, Signal.id == Outcome.signal_id)
+            .join(Strategy, Strategy.id == Signal.strategy_id)
+            .where(Strategy.name == candidate.strategy_name)
+            .order_by(Outcome.created_at.desc())
+            .limit(STRATEGY_LOSS_STREAK_LIMIT)
+        )
+        rows = (await session.execute(stmt)).all()
+
+        if len(rows) < STRATEGY_LOSS_STREAK_LIMIT:
+            return None  # Not enough history to judge
+
+        all_sl = all(r[0] == "sl_hit" for r in rows)
+        if not all_sl:
+            return None  # Streak broken by a win or expiry
+
+        most_recent = rows[0][1]
+        if most_recent is None:
+            return None
+
+        if most_recent.tzinfo is None:
+            most_recent = most_recent.replace(tzinfo=timezone.utc)
+
+        hours_since = (
+            datetime.now(timezone.utc) - most_recent
+        ).total_seconds() / 3600
+
+        if hours_since < STRATEGY_COOLDOWN_HOURS:
+            remaining = round(STRATEGY_COOLDOWN_HOURS - hours_since, 1)
+            return (
+                f"{STRATEGY_LOSS_STREAK_LIMIT} consecutive SL hits; "
+                f"cooldown active for {remaining}h more"
+            )
         return None
 
     async def _check_directional_bias(

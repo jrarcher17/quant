@@ -17,7 +17,7 @@ class TradeSettingsPayload(BaseModel):
     tp1_rr: float = Field(default=1.5, ge=0.5, le=10.0)
     tp2_rr: float = Field(default=3.0, ge=0.5, le=20.0)
     min_risk_reward: float = Field(default=1.3, ge=0.5, le=10.0)
-    min_confidence: float = Field(default=40.0, ge=0.0, le=100.0)
+    min_confidence: float = Field(default=60.0, ge=0.0, le=100.0)
     max_concurrent_signals: int = Field(default=3, ge=1, le=20)
     daily_loss_limit_pct: float = Field(default=0.02, ge=0.001, le=0.50)
     hedge_min_confidence: float = Field(default=100.0, ge=0.0, le=100.0)
