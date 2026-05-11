@@ -11,7 +11,7 @@ if (!secret) {
 
 export function createAuth(options?: { disableSignUp?: boolean }) {
   return betterAuth({
-    appName: "QuantConnect",
+    appName: "ApexQ",
     baseURL,
     basePath: "/api/auth",
     secret,
