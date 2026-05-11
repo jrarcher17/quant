@@ -14,6 +14,7 @@ from app.config import get_settings
 from app.database import get_session
 from app.market import to_twelve_data_symbol
 from app.models.backtest_result import BacktestResult
+from app.models.broker_order import BrokerOrder
 from app.models.candle import Candle
 from app.models.optimized_params import OptimizedParams
 from app.models.outcome import Outcome
@@ -487,4 +488,94 @@ async def dashboard_price(
         "last_candle": last_candle,
         "timestamp": now.isoformat(),
         "source": source,
+    }
+
+
+@router.get("/portfolio")
+async def portfolio_data(
+    session: AsyncSession = Depends(get_session),
+):
+    """Return broker account state plus recent broker orders.
+
+    When OANDA integration is disabled, returns a stub payload with
+    enabled=false so the frontend can render an appropriate empty state.
+    """
+    settings = get_settings()
+
+    broker_info: dict = {
+        "enabled": settings.oanda_enabled,
+        "mode": settings.oanda_mode,
+    }
+
+    account: dict | None = None
+    open_positions: list[dict] = []
+
+    if settings.oanda_enabled and settings.oanda_api_token and settings.oanda_account_id:
+        try:
+            from app.services.broker.oanda import OandaAdapter
+
+            adapter = OandaAdapter(
+                api_token=settings.oanda_api_token,
+                account_id=settings.oanda_account_id,
+                mode=settings.oanda_mode,
+            )
+            acct = await adapter.get_account()
+            account = {
+                "balance": float(acct.balance),
+                "equity": float(acct.equity),
+                "unrealized_pnl": float(acct.unrealized_pnl),
+                "margin_used": float(acct.margin_used),
+                "margin_available": float(acct.margin_available),
+                "currency": acct.currency,
+            }
+            positions = await adapter.get_open_positions()
+            open_positions = [
+                {
+                    "trade_id": p.trade_id,
+                    "instrument": p.instrument,
+                    "units": float(p.units),
+                    "open_price": float(p.open_price),
+                    "unrealized_pnl": float(p.unrealized_pnl),
+                    "stop_loss": float(p.stop_loss) if p.stop_loss else None,
+                    "take_profit": float(p.take_profit) if p.take_profit else None,
+                }
+                for p in positions
+            ]
+        except Exception as exc:
+            broker_info["error"] = str(exc)[:200]
+
+    # Recent broker orders from our DB (last 50)
+    recent_orders: list[dict] = []
+    try:
+        stmt = (
+            select(BrokerOrder)
+            .order_by(BrokerOrder.created_at.desc())
+            .limit(50)
+        )
+        result = await session.execute(stmt)
+        orders = result.scalars().all()
+        recent_orders = [
+            {
+                "id": o.id,
+                "signal_id": o.signal_id,
+                "broker_order_id": o.broker_order_id,
+                "broker_trade_id": o.broker_trade_id,
+                "instrument": o.instrument,
+                "units": float(o.units),
+                "fill_price": float(o.fill_price) if o.fill_price else None,
+                "mode": o.mode,
+                "status": o.status,
+                "error_detail": o.error_detail,
+                "created_at": o.created_at.isoformat() if o.created_at else None,
+            }
+            for o in orders
+        ]
+    except Exception:
+        pass
+
+    return {
+        "broker": broker_info,
+        "account": account,
+        "open_positions": open_positions,
+        "recent_orders": recent_orders,
     }
