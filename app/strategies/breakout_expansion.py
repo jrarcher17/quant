@@ -14,7 +14,7 @@ import pandas as pd
 
 from typing import ClassVar
 
-from app.strategies.base import BaseStrategy, CandidateSignal, Direction, get_pip_value
+from app.strategies.base import BaseStrategy, CandidateSignal, Direction
 from app.strategies.helpers import (
     compute_atr,
     get_active_sessions,
@@ -50,7 +50,7 @@ class BreakoutExpansionStrategy(BaseStrategy):
         "WIDE_RANGE_ATR_MULT": 2.0,
         "BREAKOUT_BODY_ATR": 1.5,
         "MIN_RISK_ATR": 1.5,
-        "MIN_SL_PIPS": 100.0,
+        "MIN_SL_PRICE": 10.0,
         "TP1_RR": 1.5,
         "TP2_RR": 3.0,
         "BASE_CONFIDENCE": 50,
@@ -61,7 +61,7 @@ class BreakoutExpansionStrategy(BaseStrategy):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def analyze(self, candles: pd.DataFrame, symbol: str = "XAUUSD") -> list[CandidateSignal]:
+    def analyze(self, candles: pd.DataFrame) -> list[CandidateSignal]:
         """Scan *candles* for consolidation breakout setups.
 
         Args:
@@ -131,7 +131,7 @@ class BreakoutExpansionStrategy(BaseStrategy):
                             i, consol_start, consol_length,
                             atr_val, atr_ma_val,
                             opens, highs, lows, closes, timestamps,
-                            volumes, has_volume, symbol,
+                            volumes, has_volume,
                         )
                         if signal is not None:
                             signals.append(signal)
@@ -158,7 +158,6 @@ class BreakoutExpansionStrategy(BaseStrategy):
         timestamps: np.ndarray,
         volumes: np.ndarray | None,
         has_volume: bool,
-        symbol: str = "XAUUSD",
     ) -> CandidateSignal | None:
         """Check if bar *i* is a breakout from the consolidation range."""
         # Consolidation range
@@ -209,14 +208,14 @@ class BreakoutExpansionStrategy(BaseStrategy):
                 i, close_val, range_high, range_low, range_height,
                 atr_val, consol_length, candle_body,
                 volume_confirms, london_open,
-                timestamps, session, ts, symbol,
+                timestamps, session, ts,
             )
         else:
             return self._build_bearish_signal(
                 i, close_val, range_high, range_low, range_height,
                 atr_val, consol_length, candle_body,
                 volume_confirms, london_open,
-                timestamps, session, ts, symbol,
+                timestamps, session, ts,
             )
 
     # ------------------------------------------------------------------
@@ -237,7 +236,6 @@ class BreakoutExpansionStrategy(BaseStrategy):
         timestamps: np.ndarray,
         session: str | None,
         ts: datetime,
-        symbol: str = "XAUUSD",
     ) -> CandidateSignal:
         """Build a bullish breakout signal."""
         # Stop loss: range_low (or midpoint if range is very wide)
@@ -248,10 +246,10 @@ class BreakoutExpansionStrategy(BaseStrategy):
 
         risk_dist = abs(entry - sl)
 
-        # Enforce minimum SL distance: max of ATR-based and pip floor
+        # Enforce minimum SL distance: max of ATR-based and absolute floor
         min_risk = max(
             self.params["MIN_RISK_ATR"] * atr_val,
-            self.params["MIN_SL_PIPS"] * get_pip_value(symbol),
+            self.params["MIN_SL_PRICE"],
         )
         if risk_dist < min_risk:
             sl = entry - min_risk
@@ -283,7 +281,7 @@ class BreakoutExpansionStrategy(BaseStrategy):
 
         return CandidateSignal(
             strategy_name=self.name,
-            symbol=symbol,
+            symbol="XAUUSD",
             timeframe=self.required_timeframes[0],
             direction=Direction.BUY,
             entry_price=Decimal(str(round(entry, 2))),
@@ -312,7 +310,6 @@ class BreakoutExpansionStrategy(BaseStrategy):
         timestamps: np.ndarray,
         session: str | None,
         ts: datetime,
-        symbol: str = "XAUUSD",
     ) -> CandidateSignal:
         """Build a bearish breakout signal."""
         # Stop loss: range_high (or midpoint if range is very wide)
@@ -323,10 +320,10 @@ class BreakoutExpansionStrategy(BaseStrategy):
 
         risk_dist = abs(sl - entry)
 
-        # Enforce minimum SL distance: max of ATR-based and pip floor
+        # Enforce minimum SL distance: max of ATR-based and absolute floor
         min_risk = max(
             self.params["MIN_RISK_ATR"] * atr_val,
-            self.params["MIN_SL_PIPS"] * get_pip_value(symbol),
+            self.params["MIN_SL_PRICE"],
         )
         if risk_dist < min_risk:
             sl = entry + min_risk
@@ -358,7 +355,7 @@ class BreakoutExpansionStrategy(BaseStrategy):
 
         return CandidateSignal(
             strategy_name=self.name,
-            symbol=symbol,
+            symbol="XAUUSD",
             timeframe=self.required_timeframes[0],
             direction=Direction.SELL,
             entry_price=Decimal(str(round(entry, 2))),

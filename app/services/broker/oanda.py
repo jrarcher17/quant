@@ -44,10 +44,6 @@ _SYMBOL_TO_INSTRUMENT: dict[str, str] = {
     "XAU_USD": "XAU_USD",
     "EURUSD": "EUR_USD",
     "GBPUSD": "GBP_USD",
-    "AUDUSD": "AUD_USD",
-    "NZDUSD": "NZD_USD",
-    "USDCAD": "USD_CAD",
-    "USDCHF": "USD_CHF",
     "USDJPY": "USD_JPY",
 }
 

@@ -128,14 +128,12 @@ class ParamOptimizer:
         self,
         strategy_name: str,
         candles: pd.DataFrame,
-        symbol: str = "XAUUSD",
     ) -> OptimizationResult | None:
         """Optimize parameters for a single strategy.
 
         Args:
             strategy_name: Registered strategy name.
-            candles: Full H1 candle DataFrame.
-            symbol: Trading instrument (e.g. "XAUUSD", "EURUSD").
+            candles: Full H1 XAUUSD candle DataFrame.
 
         Returns:
             OptimizationResult with best params, or None if no viable
@@ -169,7 +167,7 @@ class ParamOptimizer:
             try:
                 strategy = strategy_cls(params=params)
                 metrics, trades = self.runner.run_full_backtest(
-                    strategy, candles, window_days=30, symbol=symbol
+                    strategy, candles, window_days=30
                 )
 
                 if metrics.total_trades < MIN_TRADES_OPTIMIZE:
@@ -216,7 +214,7 @@ class ParamOptimizer:
 
                 # 4. Walk-forward validation
                 wf_result = self.wf_validator.validate(
-                    strategy, candles, window_days=30, symbol=symbol
+                    strategy, candles, window_days=30
                 )
 
                 if wf_result.is_overfitted:
@@ -241,7 +239,7 @@ class ParamOptimizer:
                 for window in VALIDATION_WINDOWS:
                     try:
                         w_metrics, _ = self.runner.run_full_backtest(
-                            strategy, candles, window_days=window, symbol=symbol
+                            strategy, candles, window_days=window
                         )
                         if (
                             w_metrics.total_trades >= MIN_TRADES_OPTIMIZE

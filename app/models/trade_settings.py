@@ -3,7 +3,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, DateTime, Numeric, String, func
+from sqlalchemy import BigInteger, DateTime, Numeric, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -58,10 +58,6 @@ class TradeSettings(Base):
     # and falls back to time-window-only dedup.
     dedup_price_distance_pips: Mapped[Decimal] = mapped_column(
         Numeric(10, 2), nullable=False, default=Decimal("30.00")
-    )
-    # Active trading instrument — overrides the TRADING_SYMBOL env var when set.
-    trading_symbol: Mapped[str] = mapped_column(
-        String(10), nullable=False, default="XAUUSD"
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

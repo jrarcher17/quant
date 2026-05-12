@@ -15,7 +15,7 @@ import pandas as pd
 
 from typing import ClassVar
 
-from app.strategies.base import BaseStrategy, CandidateSignal, Direction, get_pip_value
+from app.strategies.base import BaseStrategy, CandidateSignal, Direction
 from app.strategies.helpers import (
     compute_atr,
     compute_ema,
@@ -56,7 +56,7 @@ class EMAMomentumStrategy(BaseStrategy):
         "BODY_ATR_MULT": 0.4,          # Min candle body as fraction of ATR
         "SL_ATR_MULT": 1.5,            # SL padding below swing low
         "MIN_RISK_ATR": 1.5,           # Minimum SL distance in ATR units
-        "MIN_SL_PIPS": 100.0,          # Minimum SL distance in pips (symbol-agnostic)
+        "MIN_SL_PRICE": 10.0,          # Absolute minimum SL distance in price ($)
         "TP1_RR": 1.5,                 # TP1 risk:reward
         "TP2_RR": 3.0,                 # TP2 risk:reward
         "EMA_SLOPE_BARS": 5,           # Bars to check EMA slope
@@ -64,12 +64,13 @@ class EMAMomentumStrategy(BaseStrategy):
         "SWING_LOOKBACK": 20,          # Bars to search for swing low/high
         "BASE_CONFIDENCE": 50,
         "MAX_SL_PIPS": 500.0,          # Hard cap on SL distance in pips
+        "PIP_VALUE": 0.10,             # XAUUSD pip value
     }
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def analyze(self, candles: pd.DataFrame, symbol: str = "XAUUSD") -> list[CandidateSignal]:
+    def analyze(self, candles: pd.DataFrame) -> list[CandidateSignal]:
         """Scan *candles* for EMA momentum setups.
 
         Args:
@@ -173,7 +174,7 @@ class EMAMomentumStrategy(BaseStrategy):
                     ema_f, ema_m, ema_s,
                     highs, lows, timestamps,
                     swing_low_indices, swing_high_indices,
-                    ts, symbol,
+                    ts,
                 )
                 if signal is not None:
                     signals.append(signal)
@@ -184,7 +185,7 @@ class EMAMomentumStrategy(BaseStrategy):
                     ema_f, ema_m, ema_s,
                     highs, lows, timestamps,
                     swing_high_indices, swing_low_indices,
-                    ts, symbol,
+                    ts,
                 )
                 if signal is not None:
                     signals.append(signal)
@@ -208,12 +209,11 @@ class EMAMomentumStrategy(BaseStrategy):
         swing_low_indices: np.ndarray,
         swing_high_indices: np.ndarray,
         ts: datetime,
-        symbol: str = "XAUUSD",
     ) -> CandidateSignal | None:
         """Build a bullish EMA momentum signal."""
         lookback = int(self.params["SWING_LOOKBACK"])
         max_sl_pips = self.params["MAX_SL_PIPS"]
-        pip_value = get_pip_value(symbol)
+        pip_value = self.params["PIP_VALUE"]
 
         # SL: recent swing low - padding
         sl = self._find_recent_swing_low(
@@ -226,11 +226,11 @@ class EMAMomentumStrategy(BaseStrategy):
 
         sl -= self.params["SL_ATR_MULT"] * atr_val
 
-        # Enforce minimum SL distance: max of ATR-based and pip floor
+        # Enforce minimum SL distance: max of ATR-based and absolute floor
         risk_dist = abs(entry - sl)
         min_risk = max(
             self.params["MIN_RISK_ATR"] * atr_val,
-            self.params["MIN_SL_PIPS"] * pip_value,
+            self.params["MIN_SL_PRICE"],
         )
         if risk_dist < min_risk:
             sl = entry - min_risk
@@ -271,7 +271,7 @@ class EMAMomentumStrategy(BaseStrategy):
 
         return CandidateSignal(
             strategy_name=self.name,
-            symbol=symbol,
+            symbol="XAUUSD",
             timeframe=self.required_timeframes[0],
             direction=Direction.BUY,
             entry_price=Decimal(str(round(entry, 2))),
@@ -299,12 +299,11 @@ class EMAMomentumStrategy(BaseStrategy):
         swing_high_indices: np.ndarray,
         swing_low_indices: np.ndarray,
         ts: datetime,
-        symbol: str = "XAUUSD",
     ) -> CandidateSignal | None:
         """Build a bearish EMA momentum signal."""
         lookback = int(self.params["SWING_LOOKBACK"])
         max_sl_pips = self.params["MAX_SL_PIPS"]
-        pip_value = get_pip_value(symbol)
+        pip_value = self.params["PIP_VALUE"]
 
         # SL: recent swing high + padding
         sl = self._find_recent_swing_high(
@@ -317,11 +316,11 @@ class EMAMomentumStrategy(BaseStrategy):
 
         sl += self.params["SL_ATR_MULT"] * atr_val
 
-        # Enforce minimum SL distance: max of ATR-based and pip floor
+        # Enforce minimum SL distance: max of ATR-based and absolute floor
         risk_dist = abs(sl - entry)
         min_risk = max(
             self.params["MIN_RISK_ATR"] * atr_val,
-            self.params["MIN_SL_PIPS"] * pip_value,
+            self.params["MIN_SL_PRICE"],
         )
         if risk_dist < min_risk:
             sl = entry + min_risk
@@ -362,7 +361,7 @@ class EMAMomentumStrategy(BaseStrategy):
 
         return CandidateSignal(
             strategy_name=self.name,
-            symbol=symbol,
+            symbol="XAUUSD",
             timeframe=self.required_timeframes[0],
             direction=Direction.SELL,
             entry_price=Decimal(str(round(entry, 2))),

@@ -38,27 +38,15 @@ templates = Jinja2Templates(
 _start_time: datetime.datetime = datetime.datetime.now(datetime.UTC)
 
 
-async def _active_symbol(session: AsyncSession) -> str:
-    """Return the active trading symbol from DB settings (falls back to env)."""
-    try:
-        ts = await get_trade_settings(session)
-        return ts.trading_symbol or get_settings().trading_symbol
-    except Exception:
-        return get_settings().trading_symbol
-
-
 @router.get("/", response_class=HTMLResponse)
-async def dashboard_page(
-    request: Request,
-    session: AsyncSession = Depends(get_session),
-):
+async def dashboard_page(request: Request):
     """Serve the dashboard HTML page."""
-    symbol = await _active_symbol(session)
+    settings = get_settings()
     return templates.TemplateResponse(
         request=request,
         name="dashboard.html",
         context={
-            "symbol": symbol,
+            "symbol": settings.trading_symbol,
         },
     )
 
@@ -68,7 +56,7 @@ async def dashboard_data(
     session: AsyncSession = Depends(get_session),
 ):
     """Return all dashboard data as a single JSON payload."""
-    symbol = await _active_symbol(session)
+    symbol = get_settings().trading_symbol
     now = datetime.datetime.now(datetime.UTC)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     uptime = (now - _start_time).total_seconds()
@@ -430,7 +418,8 @@ async def dashboard_price(
     session: AsyncSession = Depends(get_session),
 ):
     """Return the latest live quote for the configured symbol."""
-    symbol = await _active_symbol(session)
+    settings = get_settings()
+    symbol = settings.trading_symbol
     now = datetime.datetime.now(datetime.UTC)
     price = None
     source = "live"

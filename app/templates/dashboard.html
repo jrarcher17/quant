@@ -703,8 +703,7 @@
             text-transform: uppercase;
         }
 
-        .settings-field input,
-        .settings-field select {
+        .settings-field input {
             width: 100%;
             height: 42px;
             border: 1px solid rgba(148, 163, 184, 0.16);
@@ -717,18 +716,7 @@
             outline: none;
         }
 
-        .settings-field select {
-            cursor: pointer;
-            appearance: none;
-            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
-            background-repeat: no-repeat;
-            background-position: right 12px center;
-            background-color: rgba(2, 6, 23, 0.66);
-            padding-right: 36px;
-        }
-
-        .settings-field input:focus,
-        .settings-field select:focus {
+        .settings-field input:focus {
             border-color: var(--border-active);
             box-shadow: 0 0 0 3px var(--accent-glow);
         }
@@ -1205,20 +1193,6 @@
         </div>
 
         <div class="settings-grid">
-            <div class="settings-field" style="grid-column: 1 / -1;">
-                <label for="setting-symbol">Trading Symbol</label>
-                <select id="setting-symbol" name="trading_symbol" required>
-                    <option value="XAUUSD">XAUUSD — Gold / US Dollar</option>
-                    <option value="EURUSD">EURUSD — Euro / US Dollar</option>
-                    <option value="GBPUSD">GBPUSD — British Pound / US Dollar</option>
-                    <option value="AUDUSD">AUDUSD — Australian Dollar / US Dollar</option>
-                    <option value="NZDUSD">NZDUSD — New Zealand Dollar / US Dollar</option>
-                    <option value="USDCAD">USDCAD — US Dollar / Canadian Dollar</option>
-                    <option value="USDCHF">USDCHF — US Dollar / Swiss Franc</option>
-                    <option value="USDJPY">USDJPY — US Dollar / Japanese Yen</option>
-                </select>
-                <div class="field-help">The instrument all strategies will trade. Changing this restarts data collection for the new symbol on next candle refresh.</div>
-            </div>
             <div class="settings-field">
                 <label for="setting-risk">Risk % Per Trade</label>
                 <input id="setting-risk" name="risk_per_trade_pct" type="number" min="0.1" max="5" step="0.1" required>
@@ -1929,7 +1903,6 @@ function closeTradeSettingsModal() {
 }
 
 function fillTradeSettingsForm(settings) {
-    document.getElementById('setting-symbol').value = settings.trading_symbol || 'XAUUSD';
     document.getElementById('setting-risk').value = formatNumber(finiteNumber(settings.risk_per_trade_pct) * 100, 2);
     document.getElementById('setting-max-sl').value = settings.max_sl_pips;
     document.getElementById('setting-tp1').value = settings.tp1_rr;
@@ -1964,7 +1937,6 @@ function readTradeSettingsForm() {
     }
 
     return {
-        trading_symbol: document.getElementById('setting-symbol').value,
         risk_per_trade_pct: riskPct,
         max_sl_pips: Number(document.getElementById('setting-max-sl').value),
         tp1_rr: tp1,

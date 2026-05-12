@@ -71,7 +71,6 @@ class WalkForwardValidator:
         strategy: BaseStrategy,
         candles: pd.DataFrame,
         window_days: int = 30,
-        symbol: str = "XAUUSD",
     ) -> WalkForwardResult:
         """Run walk-forward validation on a strategy.
 
@@ -99,10 +98,10 @@ class WalkForwardValidator:
 
         # Run backtests independently on each period
         is_metrics, is_trades = self.runner.run_full_backtest(
-            strategy, is_candles, window_days, symbol=symbol
+            strategy, is_candles, window_days
         )
         oos_metrics, oos_trades = self.runner.run_full_backtest(
-            strategy, oos_candles, window_days, symbol=symbol
+            strategy, oos_candles, window_days
         )
 
         logger.info(

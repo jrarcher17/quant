@@ -17,30 +17,6 @@ class Direction(str, Enum):
     SELL = "SELL"
 
 
-# Price value of one pip per symbol.
-# Forex majors: 0.0001 (4th decimal), JPY pairs: 0.01 (2nd decimal).
-# Metals: 0.10 (XAU/USD moves in $0.10 increments per pip).
-PIP_VALUES: dict[str, float] = {
-    "XAUUSD": 0.10,
-    "XAU_USD": 0.10,
-    "EURUSD": 0.0001,
-    "GBPUSD": 0.0001,
-    "AUDUSD": 0.0001,
-    "NZDUSD": 0.0001,
-    "USDCAD": 0.0001,
-    "USDCHF": 0.0001,
-    "USDJPY": 0.01,
-}
-
-
-def get_pip_value(symbol: str) -> float:
-    """Return the pip size (price per pip) for *symbol*.
-
-    Falls back to 0.0001 (standard forex) for unknown symbols.
-    """
-    return PIP_VALUES.get(symbol.upper().replace("/", "").replace("-", ""), 0.0001)
-
-
 class CandidateSignal(BaseModel):
     """Pydantic model for strategy signal output.
 
@@ -125,15 +101,13 @@ class BaseStrategy(ABC):
                 BaseStrategy._registry[cls.name] = cls
 
     @abstractmethod
-    def analyze(self, candles: pd.DataFrame, symbol: str = "XAUUSD") -> list[CandidateSignal]:
+    def analyze(self, candles: pd.DataFrame) -> list[CandidateSignal]:
         """Analyze candle data and return candidate trade signals.
 
         Args:
             candles: DataFrame with columns [timestamp, open, high, low, close]
                      and optionally [volume]. Values are floats (use
                      candles_to_dataframe to convert from ORM objects).
-            symbol: The trading instrument (e.g. "XAUUSD", "EURUSD").
-                    Used to resolve pip value and label signals correctly.
 
         Returns:
             List of CandidateSignal instances (may be empty).

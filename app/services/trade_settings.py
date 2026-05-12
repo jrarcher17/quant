@@ -1,7 +1,6 @@
 """Helpers for loading and updating user-editable trade settings."""
 
 from decimal import Decimal
-from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
@@ -9,23 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.trade_settings import TradeSettings
 
-# Symbols available in the OANDA adapter — shown in the UI dropdown.
-SUPPORTED_SYMBOLS: list[str] = [
-    "XAUUSD",
-    "EURUSD",
-    "GBPUSD",
-    "AUDUSD",
-    "NZDUSD",
-    "USDCAD",
-    "USDCHF",
-    "USDJPY",
-]
-
 
 class TradeSettingsPayload(BaseModel):
     """Validated trade settings payload used by API and services."""
 
-    trading_symbol: str = Field(default="XAUUSD")
     risk_per_trade_pct: float = Field(default=0.01, ge=0.001, le=0.05)
     max_sl_pips: float = Field(default=800.0, ge=1.0, le=5000.0)
     tp1_rr: float = Field(default=1.5, ge=0.5, le=10.0)
@@ -40,22 +26,15 @@ class TradeSettingsPayload(BaseModel):
 
     @model_validator(mode="after")
     def validate_targets(self) -> "TradeSettingsPayload":
-        """Require TP2 to be at least TP1, and symbol to be supported."""
+        """Require TP2 to be at least TP1."""
         if self.tp2_rr < self.tp1_rr:
             raise ValueError("TP2 R multiple must be greater than or equal to TP1")
-        symbol = self.trading_symbol.strip().upper().replace("/", "").replace("-", "")
-        if symbol not in SUPPORTED_SYMBOLS:
-            raise ValueError(
-                f"Unsupported symbol '{symbol}'. Must be one of: {SUPPORTED_SYMBOLS}"
-            )
-        self.trading_symbol = symbol
         return self
 
 
 def trade_settings_to_payload(settings: TradeSettings) -> TradeSettingsPayload:
     """Convert ORM row to API payload."""
     return TradeSettingsPayload(
-        trading_symbol=settings.trading_symbol or "XAUUSD",
         risk_per_trade_pct=float(settings.risk_per_trade_pct),
         max_sl_pips=float(settings.max_sl_pips),
         tp1_rr=float(settings.tp1_rr),
@@ -94,7 +73,6 @@ async def update_trade_settings(
         settings = TradeSettings(id=1)
         session.add(settings)
 
-    settings.trading_symbol = payload.trading_symbol
     settings.risk_per_trade_pct = Decimal(str(payload.risk_per_trade_pct))
     settings.max_sl_pips = Decimal(str(payload.max_sl_pips))
     settings.tp1_rr = Decimal(str(payload.tp1_rr))
