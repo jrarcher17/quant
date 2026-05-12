@@ -5,33 +5,30 @@
 --
 -- Keeps:    trade_settings (your risk config + chosen symbol)
 --           strategies     (strategy registry rows)
---
--- Run this in the Neon SQL console or via psql:
---   psql $DATABASE_URL -f scripts/reset_trading_data.sql
 
-BEGIN;
+-- Clear any broken transaction state from a previous failure
+ROLLBACK;
 
-DELETE FROM broker_orders;
-DELETE FROM outcomes;
-DELETE FROM signals;
-DELETE FROM candles;
-DELETE FROM backtest_results;
-DELETE FROM optimized_params;
-DELETE FROM strategy_performance;
-
-COMMIT;
+-- Delete in FK-safe order (children before parents)
+DELETE FROM broker_orders   WHERE true;
+DELETE FROM outcomes        WHERE true;
+DELETE FROM signals         WHERE true;
+DELETE FROM candles         WHERE true;
+DELETE FROM backtest_results     WHERE true;
+DELETE FROM optimized_params     WHERE true;
+DELETE FROM strategy_performance WHERE true;
 
 -- Confirm row counts (should all be 0)
-SELECT 'broker_orders'        AS tbl, COUNT(*) AS rows FROM broker_orders
+SELECT 'broker_orders'           AS tbl, COUNT(*) AS rows FROM broker_orders
 UNION ALL
-SELECT 'outcomes',                     COUNT(*) FROM outcomes
+SELECT 'outcomes',                        COUNT(*) FROM outcomes
 UNION ALL
-SELECT 'signals',                      COUNT(*) FROM signals
+SELECT 'signals',                         COUNT(*) FROM signals
 UNION ALL
-SELECT 'candles',                      COUNT(*) FROM candles
+SELECT 'candles',                         COUNT(*) FROM candles
 UNION ALL
-SELECT 'backtest_results',             COUNT(*) FROM backtest_results
+SELECT 'backtest_results',                COUNT(*) FROM backtest_results
 UNION ALL
-SELECT 'optimized_params',             COUNT(*) FROM optimized_params
+SELECT 'optimized_params',                COUNT(*) FROM optimized_params
 UNION ALL
-SELECT 'strategy_performance',         COUNT(*) FROM strategy_performance;
+SELECT 'strategy_performance',            COUNT(*) FROM strategy_performance;
