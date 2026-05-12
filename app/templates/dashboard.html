@@ -831,14 +831,58 @@
             </div>
         </div>
 
+        <!-- PAPER TRADING (full width, where chart used to be) -->
+        <div class="card" style="margin-bottom:24px;">
+            <div class="card-header">
+                <div class="card-title">Paper Trading</div>
+            </div>
+            <div class="card-body">
+                <!-- Account summary cards -->
+                <div id="paper-account-row" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;margin-bottom:20px;">
+                    <div class="paper-stat"><div class="paper-stat-label">Balance</div><div class="paper-stat-value" id="paper-balance">--</div></div>
+                    <div class="paper-stat"><div class="paper-stat-label">Equity</div><div class="paper-stat-value" id="paper-equity">--</div></div>
+                    <div class="paper-stat"><div class="paper-stat-label">Total P&amp;L</div><div class="paper-stat-value" id="paper-pnl">--</div></div>
+                    <div class="paper-stat"><div class="paper-stat-label">Win Rate</div><div class="paper-stat-value" id="paper-winrate">--</div></div>
+                    <div class="paper-stat"><div class="paper-stat-label">Trades</div><div class="paper-stat-value" id="paper-trades-count">--</div></div>
+                    <div class="paper-stat"><div class="paper-stat-label">Open</div><div class="paper-stat-value" id="paper-open-count">--</div></div>
+                </div>
+
+                <!-- Open Positions -->
+                <div style="margin-bottom:6px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--text-secondary);">Open Positions</div>
+                <div style="overflow-x:auto;margin-bottom:20px;">
+                    <table class="table" id="paper-open-table">
+                        <thead><tr>
+                            <th>Dir</th><th>Symbol</th><th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th>
+                            <th>Units</th><th>TP1 Hit</th><th>Unreal P&amp;L</th><th>Opened</th>
+                        </tr></thead>
+                        <tbody id="paper-open-body"></tbody>
+                    </table>
+                    <div class="empty-state" id="paper-open-empty" style="display:none;">
+                        <div class="icon">~</div>No open positions
+                    </div>
+                </div>
+
+                <!-- Trade History -->
+                <div style="margin-bottom:6px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--text-secondary);">Trade History</div>
+                <div style="overflow-x:auto;">
+                    <table class="table" id="paper-history-table">
+                        <thead><tr>
+                            <th>Dir</th><th>Symbol</th><th>Entry</th><th>Exit</th><th>Result</th><th>P&amp;L</th><th>Opened</th><th>Closed</th>
+                        </tr></thead>
+                        <tbody id="paper-history-body"></tbody>
+                    </table>
+                    <div class="empty-state" id="paper-history-empty" style="display:none;">
+                        <div class="icon">~</div>No completed trades yet
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- TABBED PANEL: Recent Signals / Strategies / Backtest / Walk-Forward / Optimized Params -->
         <div class="card tabs-card">
             <div class="tabs-header" role="tablist">
                 <button class="tab-btn active" role="tab" aria-selected="true" aria-controls="tab-signals" data-tab="signals">
                     Recent Signals<span class="tab-badge" id="signal-count">0</span>
-                </button>
-                <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-portfolio" data-tab="portfolio">
-                    Paper Trading
                 </button>
                 <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-strategies" data-tab="strategies">
                     Strategies<span class="tab-badge" id="strategy-count">0</span>
@@ -879,50 +923,6 @@
                     <div class="empty-state" id="signals-empty" style="display: none;">
                         <div class="icon">~</div>
                         Awaiting first signal...
-                    </div>
-                </div>
-            </div>
-
-            <!-- Paper Trading -->
-            <div id="tab-portfolio" class="tab-panel" role="tabpanel">
-                <div class="card-body">
-                    <!-- Account summary cards -->
-                    <div id="paper-account-row" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;margin-bottom:20px;">
-                        <div class="paper-stat"><div class="paper-stat-label">Balance</div><div class="paper-stat-value" id="paper-balance">--</div></div>
-                        <div class="paper-stat"><div class="paper-stat-label">Equity</div><div class="paper-stat-value" id="paper-equity">--</div></div>
-                        <div class="paper-stat"><div class="paper-stat-label">Total P&amp;L</div><div class="paper-stat-value" id="paper-pnl">--</div></div>
-                        <div class="paper-stat"><div class="paper-stat-label">Win Rate</div><div class="paper-stat-value" id="paper-winrate">--</div></div>
-                        <div class="paper-stat"><div class="paper-stat-label">Trades</div><div class="paper-stat-value" id="paper-trades-count">--</div></div>
-                        <div class="paper-stat"><div class="paper-stat-label">Open</div><div class="paper-stat-value" id="paper-open-count">--</div></div>
-                    </div>
-
-                    <!-- Open Positions -->
-                    <div style="margin-bottom:6px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--text-secondary);">Open Positions</div>
-                    <div style="overflow-x:auto;margin-bottom:20px;">
-                        <table class="table" id="paper-open-table">
-                            <thead><tr>
-                                <th>Dir</th><th>Symbol</th><th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th>
-                                <th>Units</th><th>TP1 Hit</th><th>Unreal P&amp;L</th><th>Opened</th>
-                            </tr></thead>
-                            <tbody id="paper-open-body"></tbody>
-                        </table>
-                        <div class="empty-state" id="paper-open-empty" style="display:none;">
-                            <div class="icon">~</div>No open positions
-                        </div>
-                    </div>
-
-                    <!-- Trade History -->
-                    <div style="margin-bottom:6px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--text-secondary);">Trade History</div>
-                    <div style="overflow-x:auto;">
-                        <table class="table" id="paper-history-table">
-                            <thead><tr>
-                                <th>Dir</th><th>Symbol</th><th>Entry</th><th>Exit</th><th>Result</th><th>P&amp;L</th><th>Opened</th><th>Closed</th>
-                            </tr></thead>
-                            <tbody id="paper-history-body"></tbody>
-                        </table>
-                        <div class="empty-state" id="paper-history-empty" style="display:none;">
-                            <div class="icon">~</div>No completed trades yet
-                        </div>
                     </div>
                 </div>
             </div>
