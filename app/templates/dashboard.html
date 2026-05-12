@@ -1987,12 +1987,12 @@ document.getElementById('backfill-btn').addEventListener('click', async () => {
     btn.textContent = 'Backfilling…';
     try {
         await fetch('/dashboard/trigger-backfill', { method: 'POST' });
-        btn.textContent = 'Running…';
-        // Re-enable after 60s (enough time for backfill to complete)
+        btn.textContent = 'Loading (~4m)…';
+        // 4 timeframes × 65s apart = ~4.5 minutes total
         setTimeout(() => {
             btn.disabled = false;
             btn.textContent = 'Backfill Data';
-        }, 60000);
+        }, 280000);
     } catch (_) {
         btn.disabled = false;
         btn.textContent = 'Backfill Data';

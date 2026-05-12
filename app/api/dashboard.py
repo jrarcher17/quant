@@ -427,7 +427,11 @@ async def save_dashboard_settings(
 
 @router.post("/trigger-backfill")
 async def trigger_backfill():
-    """Immediately fire all candle refresh jobs for the active symbol."""
+    """Immediately fire all candle refresh jobs for the active symbol.
+
+    Staggered 65 seconds apart so each call lands in its own Twelve Data
+    rate-limit window (free tier: 8 credits/minute).
+    """
     from app.workers.jobs import refresh_candles
     import asyncio
 
@@ -437,9 +441,11 @@ async def trigger_backfill():
                 await refresh_candles(tf)
             except Exception as exc:
                 logger.warning("Backfill failed for {}: {}", tf, exc)
+            # Wait 65s before next call to stay within Twelve Data rate limit
+            await asyncio.sleep(65)
 
     asyncio.create_task(_run())
-    return {"status": "backfill started"}
+    return {"status": "backfill started — all 4 timeframes will load over ~4 minutes"}
 
 
 @router.get("/price")
