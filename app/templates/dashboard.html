@@ -866,7 +866,6 @@
                 <span id="system-label">Connecting...</span>
             </div>
             <span class="broker-badge disabled" id="broker-mode-badge">BROKER OFF</span>
-            <button class="nav-action" id="backfill-btn" type="button">Backfill Data</button>
             <button class="nav-action" id="trade-settings-open" type="button">Trade Settings</button>
             <form class="logout-form" action="/logout" method="post">
                 <button class="logout-button" type="submit">Sign out</button>
@@ -1979,25 +1978,6 @@ function readTradeSettingsForm() {
         dedup_price_distance_pips: Number(document.getElementById('setting-dedup-distance').value),
     };
 }
-
-// Backfill button
-document.getElementById('backfill-btn').addEventListener('click', async () => {
-    const btn = document.getElementById('backfill-btn');
-    btn.disabled = true;
-    btn.textContent = 'Backfilling…';
-    try {
-        await fetch('/dashboard/trigger-backfill', { method: 'POST' });
-        btn.textContent = 'Running…';
-        // Re-enable after 60s (enough time for backfill to complete)
-        setTimeout(() => {
-            btn.disabled = false;
-            btn.textContent = 'Backfill Data';
-        }, 60000);
-    } catch (_) {
-        btn.disabled = false;
-        btn.textContent = 'Backfill Data';
-    }
-});
 
 document.getElementById('trade-settings-open').addEventListener('click', openTradeSettingsModal);
 document.getElementById('trade-settings-close').addEventListener('click', closeTradeSettingsModal);

@@ -425,29 +425,11 @@ async def save_dashboard_settings(
     return await update_trade_settings(session, payload)
 
 
-@router.post("/trigger-backfill")
-async def trigger_backfill():
-    """Immediately fire all candle refresh jobs for the active symbol."""
-    from app.workers.jobs import refresh_candles
-    import asyncio
-
-    async def _run():
-        for tf in ["H1", "H4", "D1", "M15"]:
-            try:
-                await refresh_candles(tf)
-            except Exception as exc:
-                logger.warning("Backfill failed for {}: {}", tf, exc)
-
-    asyncio.create_task(_run())
-    return {"status": "backfill started"}
-
-
 @router.get("/price")
 async def dashboard_price(
     session: AsyncSession = Depends(get_session),
 ):
     """Return the latest live quote for the configured symbol."""
-    settings = get_settings()
     symbol = await _active_symbol(session)
     now = datetime.datetime.now(datetime.UTC)
     price = None
