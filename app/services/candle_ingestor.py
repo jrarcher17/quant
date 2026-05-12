@@ -52,7 +52,7 @@ class CandleIngestor:
         self.client = TDClient(apikey=api_key)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=30))
-    def _fetch_from_api(  # noqa: C901
+    def _fetch_from_api(
         self,
         symbol: str,
         interval: str,
@@ -75,23 +75,14 @@ class CandleIngestor:
         if start_date is not None:
             params["start_date"] = start_date
 
-        try:
-            ts = self.client.time_series(**params)
-            data = ts.as_json()
-        except Exception as exc:
-            # The twelvedata library raises TwelveDataError for HTTP errors.
-            # Treat rate-limit errors (429) as a soft failure — return empty
-            # so callers can continue rather than crashing.
-            msg = str(exc)
-            if "429" in msg or "run out of API credits" in msg or "rate" in msg.lower():
-                logger.warning("Twelve Data rate limited — skipping: {}", msg)
-                return []
-            raise
+        ts = self.client.time_series(**params)
+        data = ts.as_json()
 
-        # Twelve Data also returns error as a dict with "code"/"message"
+        # Twelve Data returns a dict with "code"/"message" on errors
         if isinstance(data, dict) and "code" in data:
             code = data.get("code")
             msg = data.get("message", "unknown")
+            # Rate limit — don't retry, just return empty to avoid compounding
             if code == 429:
                 logger.warning("Twelve Data rate limited: {}", msg)
                 return []
