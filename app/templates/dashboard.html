@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ApexQ — Dashboard</title>
+    <script src="https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
@@ -310,6 +311,15 @@
             margin-bottom: 24px;
         }
 
+        .chart-card {
+            margin-bottom: 24px;
+        }
+
+        .chart-container {
+            width: 100%;
+            height: 480px;
+        }
+
         /* === TABS === */
         .tabs-card {
             margin-bottom: 24px;
@@ -369,6 +379,51 @@
 
         .tab-panel.active {
             display: block;
+        }
+
+        .chart-header-main {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            flex-wrap: wrap;
+        }
+
+        .chart-controls {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .chart-control {
+            border: 1px solid rgba(56, 189, 248, 0.14);
+            border-radius: 999px;
+            padding: 6px 10px;
+            background: rgba(2, 6, 23, 0.58);
+            color: var(--text-secondary);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+        }
+
+        .chart-control:focus {
+            outline: none;
+            border-color: rgba(56, 189, 248, 0.36);
+            color: var(--text-primary);
+        }
+
+        .chart-legend {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 11px;
+            color: var(--text-dim);
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
         }
 
         .legend-dot {
@@ -754,6 +809,7 @@
             .header { padding: 14px 16px; flex-wrap: wrap; gap: 12px; }
             .content { padding: 16px; }
             .card-header { align-items: flex-start; gap: 12px; flex-direction: column; }
+            .chart-container { height: 360px; }
             .settings-grid { grid-template-columns: 1fr; }
         }
 
@@ -847,6 +903,39 @@
                 <div class="stat-label">Last Data</div>
                 <div class="stat-value accent" id="last-candle" style="font-size: 18px;">--</div>
                 <div class="stat-sub" id="scheduler-status">Scheduler: --</div>
+            </div>
+        </div>
+
+        <!-- CHART (full width) -->
+        <div class="card chart-card">
+            <div class="card-header">
+                <div class="chart-header-main">
+                    <div class="card-title" id="chart-title">{{ symbol }} H1 Chart</div>
+                    <div class="chart-controls" aria-label="Chart controls">
+                        <select class="chart-control" id="chart-timeframe" aria-label="Candle timeframe">
+                            <option value="M15">15m candles</option>
+                            <option value="H1" selected>1h candles</option>
+                            <option value="H4">4h candles</option>
+                            <option value="D1">1d candles</option>
+                        </select>
+                        <select class="chart-control" id="chart-range" aria-label="Chart range">
+                            <option value="0.5">12h</option>
+                            <option value="1">1d</option>
+                            <option value="3">3d</option>
+                            <option value="7">1w</option>
+                            <option value="14" selected>2w</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="chart-legend">
+                    <div class="legend-item"><span class="legend-dot" style="background: #3179F5;"></span>Active</div>
+                    <div class="legend-item"><span class="legend-dot" style="background: #26a69a;"></span>TP</div>
+                    <div class="legend-item"><span class="legend-dot" style="background: #ef5350;"></span>SL</div>
+                    <div class="legend-item">refresh 30s</div>
+                </div>
+            </div>
+            <div class="card-body" style="padding: 0;">
+                <div id="chart-container" class="chart-container"></div>
             </div>
         </div>
 
@@ -1250,6 +1339,179 @@
     setInterval(draw, 45);
 })();
 
+
+// ============================
+// EMBEDDED CHART
+// ============================
+const chartContainer = document.getElementById('chart-container');
+const chartTimeframe = document.getElementById('chart-timeframe');
+const chartRange = document.getElementById('chart-range');
+const chartTitle = document.getElementById('chart-title');
+let chart = null;
+let candleSeries = null;
+let activePriceLines = [];
+let activeMarkers = null;
+let selectedChartTimeframe = chartTimeframe ? chartTimeframe.value : 'H1';
+let selectedChartRangeDays = chartRange ? chartRange.value : '14';
+
+if (chartContainer && window.LightweightCharts) {
+    chart = LightweightCharts.createChart(chartContainer, {
+        layout: {
+            background: { type: 'solid', color: 'rgba(14, 18, 30, 0)' },
+            textColor: '#94a3b8',
+        },
+        grid: {
+            vertLines: { color: 'rgba(56, 189, 248, 0.06)' },
+            horzLines: { color: 'rgba(56, 189, 248, 0.06)' },
+        },
+        crosshair: {
+            mode: LightweightCharts.CrosshairMode.Normal,
+        },
+        timeScale: {
+            timeVisible: true,
+            secondsVisible: false,
+            borderColor: 'rgba(56, 189, 248, 0.12)',
+        },
+        rightPriceScale: {
+            borderColor: 'rgba(56, 189, 248, 0.12)',
+        },
+    });
+
+    candleSeries = chart.addSeries(LightweightCharts.CandlestickSeries, {
+        upColor: '#26a69a',
+        downColor: '#ef5350',
+        borderVisible: false,
+        wickUpColor: '#26a69a',
+        wickDownColor: '#ef5350',
+    });
+}
+
+function updateChartTitle() {
+    if (!chartTitle) return;
+    const timeframeLabel = chartTimeframe?.selectedOptions?.[0]?.textContent?.replace(' candles', '') || selectedChartTimeframe;
+    const rangeLabel = chartRange?.selectedOptions?.[0]?.textContent || `${selectedChartRangeDays}d`;
+    chartTitle.textContent = `${latestQuoteSymbol} ${timeframeLabel} Chart (${rangeLabel})`;
+}
+
+function chartQueryParams() {
+    return new URLSearchParams({
+        timeframe: selectedChartTimeframe,
+        range_days: selectedChartRangeDays,
+    });
+}
+
+async function loadChartCandles() {
+    if (!candleSeries) return;
+    try {
+        const resp = await fetch(`/chart/candles?${chartQueryParams().toString()}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        if (data.length > 0) {
+            candleSeries.setData(data);
+            chart.timeScale().fitContent();
+        } else {
+            candleSeries.setData([]);
+        }
+    } catch (err) {
+        console.error('Failed to load chart candles:', err);
+    }
+}
+
+async function loadChartSignals() {
+    if (!candleSeries) return;
+    try {
+        const params = new URLSearchParams({ range_days: selectedChartRangeDays });
+        const resp = await fetch(`/chart/signals?${params.toString()}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const signals = await resp.json();
+
+        const markers = signals.map(sig => ({
+            time: sig.time,
+            position: sig.direction === 'BUY' ? 'belowBar' : 'aboveBar',
+            color: sig.outcome_color,
+            shape: sig.direction === 'BUY' ? 'arrowUp' : 'arrowDown',
+            text: `${sig.direction} ${sig.confidence}%`,
+        })).sort((a, b) => a.time - b.time);
+
+        if (activeMarkers && typeof activeMarkers.setMarkers === 'function') {
+            activeMarkers.setMarkers(markers);
+        } else {
+            activeMarkers = LightweightCharts.createSeriesMarkers(candleSeries, markers);
+        }
+
+        activePriceLines.forEach(line => {
+            try { candleSeries.removePriceLine(line); } catch (e) { /* ignore */ }
+        });
+        activePriceLines = [];
+
+        signals
+            .filter(sig => sig.status === 'active')
+            .forEach(sig => {
+                activePriceLines.push(candleSeries.createPriceLine({
+                    price: sig.entry_price,
+                    color: '#3179F5',
+                    lineWidth: 1,
+                    lineStyle: LightweightCharts.LineStyle.Solid,
+                    axisLabelVisible: true,
+                    title: `${sig.direction} Entry`,
+                }));
+                activePriceLines.push(candleSeries.createPriceLine({
+                    price: sig.stop_loss,
+                    color: '#ef5350',
+                    lineWidth: 1,
+                    lineStyle: LightweightCharts.LineStyle.Dashed,
+                    axisLabelVisible: true,
+                    title: 'SL',
+                }));
+                activePriceLines.push(candleSeries.createPriceLine({
+                    price: sig.take_profit_1,
+                    color: '#26a69a',
+                    lineWidth: 1,
+                    lineStyle: LightweightCharts.LineStyle.Dashed,
+                    axisLabelVisible: true,
+                    title: 'TP1',
+                }));
+                activePriceLines.push(candleSeries.createPriceLine({
+                    price: sig.take_profit_2,
+                    color: '#26a69a',
+                    lineWidth: 1,
+                    lineStyle: LightweightCharts.LineStyle.Dashed,
+                    axisLabelVisible: true,
+                    title: 'TP2',
+                }));
+            });
+    } catch (err) {
+        console.error('Failed to load chart signals:', err);
+    }
+}
+
+async function refreshChart() {
+    updateChartTitle();
+    await loadChartCandles();
+    await loadChartSignals();
+}
+
+if (chartTimeframe) {
+    chartTimeframe.addEventListener('change', () => {
+        selectedChartTimeframe = chartTimeframe.value;
+        refreshChart();
+    });
+}
+
+if (chartRange) {
+    chartRange.addEventListener('change', () => {
+        selectedChartRangeDays = chartRange.value;
+        refreshChart();
+    });
+}
+
+window.addEventListener('resize', () => {
+    if (!chart || !chartContainer) return;
+    chart.applyOptions({
+        width: chartContainer.clientWidth,
+        height: chartContainer.clientHeight,
+    });
+});
 
 // ============================
 // DASHBOARD DATA
@@ -1933,11 +2195,13 @@ async function refreshPortfolio() {
 // Initial load
 refreshDashboard();
 refreshPrice();
+refreshChart();
 refreshPortfolio();
 
 // Auto-refresh every 30s
 setInterval(refreshDashboard, 30000);
 setInterval(refreshPrice, 30000);
+setInterval(refreshChart, 60000);
 setInterval(refreshPortfolio, 30000);
 </script>
 
