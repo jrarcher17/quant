@@ -11,6 +11,7 @@ from app.database import get_session
 from app.models.candle import Candle
 from app.models.outcome import Outcome
 from app.models.signal import Signal
+from app.services.trade_settings import get_trade_settings
 
 router = APIRouter(prefix="/chart", tags=["chart"])
 
@@ -65,7 +66,8 @@ async def get_chart_candles(
     by TradingView Lightweight Charts.
     """
     try:
-        symbol = get_settings().trading_symbol
+        ts_settings = await get_trade_settings(session)
+        symbol = ts_settings.trading_symbol or get_settings().trading_symbol
         timeframe = timeframe.upper()
         if timeframe not in VALID_TIMEFRAMES:
             timeframe = "H1"
@@ -119,7 +121,8 @@ async def get_chart_signals(
     and timing information for marker placement.
     """
     try:
-        symbol = get_settings().trading_symbol
+        ts_settings = await get_trade_settings(session)
+        symbol = ts_settings.trading_symbol or get_settings().trading_symbol
         cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=range_days)
         query = (
             select(Signal, Outcome)

@@ -33,7 +33,9 @@ async def status(
     """
     now = datetime.now(UTC)
     from app.config import get_settings
-    symbol = get_settings().trading_symbol
+    from app.services.trade_settings import get_trade_settings as _get_ts
+    _ts = await _get_ts(session)
+    symbol = _ts.trading_symbol or get_settings().trading_symbol
     uptime = (now - _start_time).total_seconds()
 
     # Database connectivity check
