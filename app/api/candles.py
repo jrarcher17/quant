@@ -16,7 +16,6 @@ from app.database import get_session
 from app.models.candle import Candle
 from app.schemas.candle import CandleResponse
 from app.services.candle_ingestor import CandleIngestor
-from app.services.trade_settings import get_trade_settings
 
 router = APIRouter(prefix="/candles", tags=["candles"])
 
@@ -43,8 +42,7 @@ async def get_candles(
     Returns candles ordered by timestamp descending (most recent first),
     with optional date range filtering and pagination via limit.
     """
-    ts = await get_trade_settings(session)
-    symbol = ts.trading_symbol or get_settings().trading_symbol
+    symbol = get_settings().trading_symbol
     query = (
         select(Candle)
         .where(Candle.symbol == symbol)
@@ -77,15 +75,13 @@ async def get_gaps(
     since forex markets are closed.
     """
     settings = get_settings()
-    ts = await get_trade_settings(session)
-    symbol = ts.trading_symbol or settings.trading_symbol
     ingestor = CandleIngestor(api_key=settings.twelve_data_api_key)
 
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=days)
 
     gaps = await ingestor.detect_gaps(
-        session, symbol, timeframe.value, start=start, end=now
+        session, settings.trading_symbol, timeframe.value, start=start, end=now
     )
 
     return gaps

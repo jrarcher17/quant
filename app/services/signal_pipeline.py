@@ -28,7 +28,6 @@ from app.services.gold_intelligence import GoldIntelligence
 from app.services.macro_filter import MacroBias, MacroBiasFilter
 from app.services.risk_manager import RiskManager
 from app.services.signal_generator import SignalGenerator
-from app.services.trade_settings import get_trade_settings
 from app.services.strategy_selector import StrategySelector
 from app.services.trade_settings import get_trade_settings
 from app.strategies.helpers.indicators import compute_atr
@@ -394,7 +393,7 @@ class SignalPipeline:
             select(Candle.high, Candle.low, Candle.close)
             .where(
                 and_(
-                    Candle.symbol == (await get_trade_settings(session)).trading_symbol or get_settings().trading_symbol,
+                    Candle.symbol == get_settings().trading_symbol,
                     Candle.timeframe == "H1",
                 )
             )

@@ -15,19 +15,15 @@ depends_on = None
 
 
 def upgrade() -> None:
-    bind = op.get_bind()
-    inspector = sa.inspect(bind)
-    existing_cols = {c["name"] for c in inspector.get_columns("trade_settings")}
-    if "trading_symbol" not in existing_cols:
-        op.add_column(
-            "trade_settings",
-            sa.Column(
-                "trading_symbol",
-                sa.String(10),
-                nullable=False,
-                server_default="XAUUSD",
-            ),
-        )
+    op.add_column(
+        "trade_settings",
+        sa.Column(
+            "trading_symbol",
+            sa.String(10),
+            nullable=False,
+            server_default="XAUUSD",
+        ),
+    )
 
 
 def downgrade() -> None:
