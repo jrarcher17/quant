@@ -442,10 +442,21 @@ async def run_signal_scanner() -> None:
             )
             signals = await pipeline.run(session)
 
+            # Open paper trades for each new signal
+            if signals:
+                from app.services.paper_broker import open_trade_from_signal
+                from app.services.trade_settings import get_trade_settings as _gts
+                ts = await _gts(session)
+                for sig in signals:
+                    try:
+                        await open_trade_from_signal(session, sig, ts.risk_per_trade_pct)
+                    except Exception as exc:
+                        logger.warning("paper_broker: failed to open trade for signal {}: {}", sig.id, exc)
+                await session.commit()
+
             # Send notifications for new signals (fire-and-forget)
             if signals:
                 settings = get_settings()
-                # Look up strategy names via session.get() (cached per strategy_id)
                 strat_lookup: dict[int, str] = {}
                 for sig in signals:
                     if sig.strategy_id not in strat_lookup:
@@ -871,3 +882,42 @@ async def run_param_optimization() -> None:
                 f"Parameter optimization has failed {count} consecutive times\n\n"
                 f"<b>Error:</b> {err_type}: {err_msg}",
             )
+
+
+async def check_paper_trades() -> None:
+    """Check open paper trades against live price and close/partial-close as needed.
+
+    Runs every 2 minutes. Fetches live price from Twelve Data then evaluates
+    each open position against SL / TP1 / TP2 levels.
+    """
+    try:
+        from app.services.paper_broker import check_open_positions, fetch_live_price
+        from app.services.trade_settings import get_trade_settings as _gts
+        from sqlalchemy import select
+        from app.models.paper_trade import PaperTrade
+
+        settings = get_settings()
+        async with async_session_factory() as session:
+            # Check if there are any open trades first
+            result = await session.execute(
+                select(PaperTrade).where(PaperTrade.status == "open").limit(1)
+            )
+            if not result.scalar_one_or_none():
+                return
+
+            ts = await _gts(session)
+            symbol = ts.trading_symbol if hasattr(ts, "trading_symbol") else settings.trading_symbol
+
+            live_price = await fetch_live_price(symbol, settings.twelve_data_api_key)
+            if live_price is None:
+                logger.warning("check_paper_trades: could not fetch live price for {}", symbol)
+                return
+
+            await check_open_positions(session, live_price)
+            logger.debug("check_paper_trades: checked positions @ {}", float(live_price))
+
+        FailureTracker.record_success("check_paper_trades")
+
+    except Exception as exc:
+        logger.exception("check_paper_trades failed")
+        FailureTracker.record_failure("check_paper_trades")

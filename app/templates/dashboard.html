@@ -462,6 +462,29 @@
             padding: 16px 20px;
         }
 
+        /* === PAPER TRADING STATS === */
+        .paper-stat {
+            background: rgba(14, 18, 30, 0.6);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 14px 16px;
+        }
+        .paper-stat-label {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-dim);
+            margin-bottom: 6px;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        .paper-stat-value {
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--text-primary);
+            font-family: 'JetBrains Mono', monospace;
+        }
+
         /* === TABLES === */
         .table {
             width: 100%;
@@ -903,6 +926,9 @@
                 <button class="tab-btn active" role="tab" aria-selected="true" aria-controls="tab-signals" data-tab="signals">
                     Recent Signals<span class="tab-badge" id="signal-count">0</span>
                 </button>
+                <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-portfolio" data-tab="portfolio">
+                    Paper Trading
+                </button>
                 <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-strategies" data-tab="strategies">
                     Strategies<span class="tab-badge" id="strategy-count">0</span>
                 </button>
@@ -942,6 +968,50 @@
                     <div class="empty-state" id="signals-empty" style="display: none;">
                         <div class="icon">~</div>
                         Awaiting first signal...
+                    </div>
+                </div>
+            </div>
+
+            <!-- Paper Trading -->
+            <div id="tab-portfolio" class="tab-panel" role="tabpanel">
+                <div class="card-body">
+                    <!-- Account summary cards -->
+                    <div id="paper-account-row" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;margin-bottom:20px;">
+                        <div class="paper-stat"><div class="paper-stat-label">Balance</div><div class="paper-stat-value" id="paper-balance">--</div></div>
+                        <div class="paper-stat"><div class="paper-stat-label">Equity</div><div class="paper-stat-value" id="paper-equity">--</div></div>
+                        <div class="paper-stat"><div class="paper-stat-label">Total P&amp;L</div><div class="paper-stat-value" id="paper-pnl">--</div></div>
+                        <div class="paper-stat"><div class="paper-stat-label">Win Rate</div><div class="paper-stat-value" id="paper-winrate">--</div></div>
+                        <div class="paper-stat"><div class="paper-stat-label">Trades</div><div class="paper-stat-value" id="paper-trades-count">--</div></div>
+                        <div class="paper-stat"><div class="paper-stat-label">Open</div><div class="paper-stat-value" id="paper-open-count">--</div></div>
+                    </div>
+
+                    <!-- Open Positions -->
+                    <div style="margin-bottom:6px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--text-secondary);">Open Positions</div>
+                    <div style="overflow-x:auto;margin-bottom:20px;">
+                        <table class="table" id="paper-open-table">
+                            <thead><tr>
+                                <th>Dir</th><th>Symbol</th><th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th>
+                                <th>Units</th><th>TP1 Hit</th><th>Unreal P&amp;L</th><th>Opened</th>
+                            </tr></thead>
+                            <tbody id="paper-open-body"></tbody>
+                        </table>
+                        <div class="empty-state" id="paper-open-empty" style="display:none;">
+                            <div class="icon">~</div>No open positions
+                        </div>
+                    </div>
+
+                    <!-- Trade History -->
+                    <div style="margin-bottom:6px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--text-secondary);">Trade History</div>
+                    <div style="overflow-x:auto;">
+                        <table class="table" id="paper-history-table">
+                            <thead><tr>
+                                <th>Dir</th><th>Symbol</th><th>Entry</th><th>Exit</th><th>Result</th><th>P&amp;L</th><th>Opened</th><th>Closed</th>
+                            </tr></thead>
+                            <tbody id="paper-history-body"></tbody>
+                        </table>
+                        <div class="empty-state" id="paper-history-empty" style="display:none;">
+                            <div class="icon">~</div>No completed trades yet
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1893,15 +1963,123 @@ tradeSettingsForm.addEventListener('submit', async (event) => {
     });
 })();
 
+// ============================
+// PAPER TRADING PORTFOLIO
+// ============================
+function fmtUsd(v) {
+    if (v === null || v === undefined) return '--';
+    const n = Number(v);
+    const abs = Math.abs(n).toFixed(2);
+    return (n >= 0 ? '+$' : '-$') + abs;
+}
+function fmtPnlClass(v) {
+    return Number(v) >= 0 ? 'var(--green)' : 'var(--red)';
+}
+function fmtDate(iso) {
+    if (!iso) return '--';
+    const d = new Date(iso);
+    return d.toLocaleDateString('en-US', { month:'short', day:'numeric' }) + ' '
+         + d.toLocaleTimeString('en-US', { hour:'2-digit', minute:'2-digit' });
+}
+function closeReasonLabel(reason) {
+    const map = { tp2: '✓ TP2', tp1: '✓ TP1', sl: '✗ SL', be: '↔ BE', expired: '⏱ Exp', manual: '⊘ Manual' };
+    return map[reason] || reason || '--';
+}
+
+async function refreshPortfolio() {
+    try {
+        const resp = await fetch('/dashboard/portfolio');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        const acc = data.account;
+
+        // Update summary cards
+        const pnlColor = fmtPnlClass(acc.total_pnl);
+        document.getElementById('paper-balance').textContent = '$' + Number(acc.balance).toFixed(2);
+        document.getElementById('paper-equity').textContent = '$' + Number(acc.equity).toFixed(2);
+        const pnlEl = document.getElementById('paper-pnl');
+        pnlEl.textContent = fmtUsd(acc.total_pnl);
+        pnlEl.style.color = pnlColor;
+        document.getElementById('paper-winrate').textContent = acc.win_rate + '%';
+        document.getElementById('paper-trades-count').textContent = acc.total_trades;
+        document.getElementById('paper-open-count').textContent = acc.open_count;
+
+        // Open positions
+        const openBody = document.getElementById('paper-open-body');
+        const openEmpty = document.getElementById('paper-open-empty');
+        const openTable = document.getElementById('paper-open-table');
+        openBody.innerHTML = '';
+        if (data.open_trades.length === 0) {
+            openTable.style.display = 'none';
+            openEmpty.style.display = '';
+        } else {
+            openTable.style.display = '';
+            openEmpty.style.display = 'none';
+            data.open_trades.forEach(t => {
+                const upnl = t.unrealised_pnl;
+                const upnlStr = upnl !== null ? fmtUsd(upnl) : '--';
+                const upnlColor = upnl !== null ? fmtPnlClass(upnl) : '';
+                const dirColor = t.direction === 'BUY' ? 'var(--green)' : 'var(--red)';
+                const tp1Badge = t.tp1_hit ? '<span style="color:var(--green);font-size:10px;">✓ TP1 hit</span>' : '—';
+                openBody.insertAdjacentHTML('beforeend', `<tr>
+                    <td style="color:${dirColor};font-weight:700;">${t.direction}</td>
+                    <td>${t.symbol}</td>
+                    <td>${t.entry_price}</td>
+                    <td style="color:var(--red)">${t.stop_loss}</td>
+                    <td style="color:var(--green)">${t.take_profit_1}</td>
+                    <td style="color:var(--green)">${t.take_profit_2}</td>
+                    <td>${Number(t.units).toFixed(4)}</td>
+                    <td>${tp1Badge}</td>
+                    <td style="color:${upnlColor};font-weight:600;">${upnlStr}</td>
+                    <td style="color:var(--text-dim);font-size:11px;">${fmtDate(t.opened_at)}</td>
+                </tr>`);
+            });
+        }
+
+        // Trade history
+        const histBody = document.getElementById('paper-history-body');
+        const histEmpty = document.getElementById('paper-history-empty');
+        const histTable = document.getElementById('paper-history-table');
+        histBody.innerHTML = '';
+        if (data.history.length === 0) {
+            histTable.style.display = 'none';
+            histEmpty.style.display = '';
+        } else {
+            histTable.style.display = '';
+            histEmpty.style.display = 'none';
+            data.history.forEach(t => {
+                const pnl = t.realized_pnl_usd;
+                const pnlColor = fmtPnlClass(pnl);
+                const dirColor = t.direction === 'BUY' ? 'var(--green)' : 'var(--red)';
+                const reason = closeReasonLabel(t.close_reason);
+                const reasonColor = t.close_reason === 'tp2' || t.close_reason === 'tp1'
+                    ? 'var(--green)' : t.close_reason === 'sl' ? 'var(--red)' : 'var(--text-secondary)';
+                histBody.insertAdjacentHTML('beforeend', `<tr>
+                    <td style="color:${dirColor};font-weight:700;">${t.direction}</td>
+                    <td>${t.symbol}</td>
+                    <td>${t.entry_price}</td>
+                    <td>${t.close_price ?? '--'}</td>
+                    <td style="color:${reasonColor};font-weight:600;">${reason}</td>
+                    <td style="color:${pnlColor};font-weight:700;">${fmtUsd(pnl)}</td>
+                    <td style="color:var(--text-dim);font-size:11px;">${fmtDate(t.opened_at)}</td>
+                    <td style="color:var(--text-dim);font-size:11px;">${fmtDate(t.closed_at)}</td>
+                </tr>`);
+            });
+        }
+    } catch (err) {
+        console.error('Failed to load portfolio:', err);
+    }
+}
+
 // Initial load
 refreshDashboard();
 refreshPrice();
-refreshChart();
+refreshPortfolio();
 
 // Auto-refresh every 30s
 setInterval(refreshDashboard, 30000);
 setInterval(refreshPrice, 30000);
-setInterval(refreshChart, 60000);
+setInterval(refreshPortfolio, 30000);
 </script>
 
 </body>

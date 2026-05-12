@@ -13,6 +13,7 @@ from loguru import logger
 
 from app.workers.jobs import (
     check_outcomes,
+    check_paper_trades,
     refresh_candles,
     refresh_macro_symbols,
     run_daily_backtests,
@@ -153,4 +154,15 @@ def register_jobs() -> None:
     )
     logger.info("Registered job: send_health_digest (daily at 06:00 UTC)")
 
-    logger.info("All {count} jobs registered", count=11)
+    scheduler.add_job(
+        check_paper_trades,
+        trigger=IntervalTrigger(minutes=2),
+        id="check_paper_trades",
+        name="Check paper trades",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    logger.info("Registered job: check_paper_trades (every 2 minutes)")
+
+    logger.info("All {count} jobs registered", count=12)

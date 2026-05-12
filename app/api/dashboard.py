@@ -488,3 +488,40 @@ async def dashboard_price(
         "timestamp": now.isoformat(),
         "source": source,
     }
+
+
+@router.get("/portfolio")
+async def dashboard_portfolio(session: AsyncSession = Depends(get_session)):
+    """Return paper trading account summary, open positions, and trade history."""
+    from decimal import Decimal
+    from app.services.paper_broker import (
+        get_account_summary,
+        get_open_trades,
+        get_trade_history,
+        fetch_live_price,
+    )
+
+    settings = get_settings()
+    ts = await get_trade_settings(session)
+    symbol = ts.trading_symbol or settings.trading_symbol
+
+    live_price_dec: Decimal | None = None
+    try:
+        live_price_dec = await fetch_live_price(symbol, settings.twelve_data_api_key)
+    except Exception:
+        pass
+
+    summary = await get_account_summary(session)
+    open_trades = await get_open_trades(session, live_price=live_price_dec)
+    history = await get_trade_history(session, limit=50)
+
+    # Add unrealised P&L to equity
+    unrealised = sum(t["unrealised_pnl"] or 0.0 for t in open_trades)
+    summary["unrealised_pnl"] = round(unrealised, 2)
+    summary["equity"] = round(summary["balance"] + unrealised, 2)
+
+    return {
+        "account": summary,
+        "open_trades": open_trades,
+        "history": history,
+    }

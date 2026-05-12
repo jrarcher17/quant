@@ -9,6 +9,7 @@ from app.models.outcome import Outcome
 from app.models.strategy_performance import StrategyPerformance
 from app.models.optimized_params import OptimizedParams
 from app.models.trade_settings import TradeSettings
+from app.models.paper_trade import PaperAccount, PaperTrade
 
 __all__ = [
     "Base",
@@ -20,4 +21,6 @@ __all__ = [
     "StrategyPerformance",
     "OptimizedParams",
     "TradeSettings",
+    "PaperAccount",
+    "PaperTrade",
 ]
