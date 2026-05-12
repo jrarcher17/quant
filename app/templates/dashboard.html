@@ -178,34 +178,6 @@
             transition: all 0.2s ease;
         }
 
-        .broker-badge {
-            font-size: 10px;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 1.5px;
-            padding: 5px 11px;
-            border-radius: 100px;
-            border: 1px solid;
-        }
-
-        .broker-badge.paper {
-            background: var(--amber-dim);
-            color: var(--amber);
-            border-color: rgba(251, 191, 36, 0.25);
-        }
-
-        .broker-badge.live {
-            background: var(--green-dim);
-            color: var(--green);
-            border-color: rgba(52, 211, 153, 0.25);
-        }
-
-        .broker-badge.disabled {
-            background: rgba(71, 85, 105, 0.15);
-            color: var(--text-dim);
-            border-color: rgba(71, 85, 105, 0.2);
-        }
-
         .nav-action {
             color: var(--accent);
             border-color: rgba(56, 189, 248, 0.18);
@@ -853,7 +825,6 @@
                 <span class="status-dot" id="status-dot"></span>
                 <span id="system-label">Connecting...</span>
             </div>
-            <span class="broker-badge disabled" id="broker-mode-badge">BROKER OFF</span>
             <button class="nav-action" id="trade-settings-open" type="button">Trade Settings</button>
             <form class="logout-form" action="/logout" method="post">
                 <button class="logout-button" type="submit">Sign out</button>
@@ -932,9 +903,6 @@
                 <button class="tab-btn active" role="tab" aria-selected="true" aria-controls="tab-signals" data-tab="signals">
                     Recent Signals<span class="tab-badge" id="signal-count">0</span>
                 </button>
-                <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-portfolio" data-tab="portfolio">
-                    Portfolio
-                </button>
                 <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-strategies" data-tab="strategies">
                     Strategies<span class="tab-badge" id="strategy-count">0</span>
                 </button>
@@ -974,91 +942,6 @@
                     <div class="empty-state" id="signals-empty" style="display: none;">
                         <div class="icon">~</div>
                         Awaiting first signal...
-                    </div>
-                </div>
-            </div>
-
-            <!-- Portfolio -->
-            <div id="tab-portfolio" class="tab-panel" role="tabpanel">
-                <!-- Account summary cards -->
-                <div id="portfolio-disabled" class="empty-state" style="display: none;">
-                    <div class="icon">~</div>
-                    Broker integration is disabled. Set <code>OANDA_ENABLED=true</code> in your environment to activate live order execution.
-                </div>
-                <div id="portfolio-account" style="display: none;">
-                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; padding: 20px;">
-                        <div class="stat-card">
-                            <div class="stat-label">Balance</div>
-                            <div class="stat-value accent" id="acct-balance">--</div>
-                            <div class="stat-sub" id="acct-currency">USD</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Equity (NAV)</div>
-                            <div class="stat-value accent" id="acct-equity">--</div>
-                            <div class="stat-sub">Net asset value</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Unrealised P&L</div>
-                            <div class="stat-value" id="acct-upnl">--</div>
-                            <div class="stat-sub">Open positions</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Margin Used</div>
-                            <div class="stat-value amber" id="acct-margin-used">--</div>
-                            <div class="stat-sub" id="acct-margin-avail">-- available</div>
-                        </div>
-                    </div>
-
-                    <!-- Open positions -->
-                    <div style="padding: 0 20px 8px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim);">Open Positions</div>
-                    <div style="padding: 0; overflow-x: auto;">
-                        <table class="table" id="positions-table">
-                            <thead>
-                                <tr>
-                                    <th>Instrument</th>
-                                    <th>Units</th>
-                                    <th>Open Price</th>
-                                    <th>Unrealised P&L</th>
-                                    <th>SL</th>
-                                    <th>TP</th>
-                                    <th>Trade ID</th>
-                                </tr>
-                            </thead>
-                            <tbody id="positions-body"></tbody>
-                        </table>
-                        <div class="empty-state" id="positions-empty" style="display: none;">
-                            <div class="icon">~</div>
-                            No open positions
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Broker error state -->
-                <div id="portfolio-error" class="empty-state" style="display: none;">
-                    <div class="icon">~</div>
-                    <span id="portfolio-error-msg">Could not connect to broker</span>
-                </div>
-
-                <!-- Recent broker orders -->
-                <div style="padding: 16px 20px 8px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim);" id="orders-section-label">Recent Orders</div>
-                <div style="padding: 0; overflow-x: auto;">
-                    <table class="table" id="orders-table">
-                        <thead>
-                            <tr>
-                                <th>Signal</th>
-                                <th>Instrument</th>
-                                <th>Units</th>
-                                <th>Fill Price</th>
-                                <th>Mode</th>
-                                <th>Status</th>
-                                <th>Time</th>
-                            </tr>
-                        </thead>
-                        <tbody id="orders-body"></tbody>
-                    </table>
-                    <div class="empty-state" id="orders-empty" style="display: none;">
-                        <div class="icon">~</div>
-                        No broker orders yet
                     </div>
                 </div>
             </div>
@@ -1990,136 +1873,6 @@ tradeSettingsForm.addEventListener('submit', async (event) => {
 });
 
 // ============================
-// PORTFOLIO
-// ============================
-function formatUnits(units) {
-    const n = Number(units);
-    const sign = n >= 0 ? '+' : '';
-    return `${sign}${n.toFixed(2)} oz`;
-}
-
-function formatMoney(value, decimals = 2) {
-    const n = Number(value);
-    if (!isFinite(n)) return '--';
-    return n.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
-}
-
-function pnlColor(value) {
-    const n = Number(value);
-    if (!isFinite(n)) return 'var(--text-secondary)';
-    return n >= 0 ? 'var(--green)' : 'var(--red)';
-}
-
-function orderStatusTag(status) {
-    const map = {
-        filled:    '<span class="result-tag tp">FILLED</span>',
-        closed:    '<span class="result-tag expired">CLOSED</span>',
-        error:     '<span class="result-tag sl">ERROR</span>',
-        pending:   '<span class="result-tag active">PENDING</span>',
-        cancelled: '<span class="result-tag expired">CANCELLED</span>',
-    };
-    return map[status] || `<span class="result-tag expired">${status.toUpperCase()}</span>`;
-}
-
-function modeBadgeTag(mode) {
-    if (mode === 'live') return '<span class="card-badge green">LIVE</span>';
-    return '<span class="card-badge amber" style="background: var(--amber-dim); color: var(--amber);">PAPER</span>';
-}
-
-async function refreshPortfolio() {
-    try {
-        const resp = await fetch('/dashboard/portfolio');
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
-
-        const broker = data.broker || {};
-        const modeBadge = document.getElementById('broker-mode-badge');
-
-        if (!broker.enabled) {
-            modeBadge.textContent = 'BROKER OFF';
-            modeBadge.className = 'broker-badge disabled';
-            document.getElementById('portfolio-disabled').style.display = 'block';
-            document.getElementById('portfolio-account').style.display = 'none';
-            document.getElementById('portfolio-error').style.display = 'none';
-        } else if (broker.error) {
-            modeBadge.textContent = broker.mode === 'live' ? 'LIVE' : 'PAPER';
-            modeBadge.className = `broker-badge ${broker.mode === 'live' ? 'live' : 'paper'}`;
-            document.getElementById('portfolio-disabled').style.display = 'none';
-            document.getElementById('portfolio-account').style.display = 'none';
-            document.getElementById('portfolio-error').style.display = 'block';
-            document.getElementById('portfolio-error-msg').textContent = broker.error;
-        } else {
-            const mode = broker.mode || 'practice';
-            modeBadge.textContent = mode === 'live' ? 'LIVE' : 'PAPER';
-            modeBadge.className = `broker-badge ${mode === 'live' ? 'live' : 'paper'}`;
-            document.getElementById('portfolio-disabled').style.display = 'none';
-            document.getElementById('portfolio-error').style.display = 'none';
-            document.getElementById('portfolio-account').style.display = 'block';
-
-            // Account cards
-            const acct = data.account || {};
-            document.getElementById('acct-balance').textContent = acct.balance != null ? `$${formatMoney(acct.balance)}` : '--';
-            document.getElementById('acct-equity').textContent = acct.equity != null ? `$${formatMoney(acct.equity)}` : '--';
-            document.getElementById('acct-currency').textContent = acct.currency || 'USD';
-            const upnlEl = document.getElementById('acct-upnl');
-            const upnl = Number(acct.unrealized_pnl);
-            upnlEl.textContent = acct.unrealized_pnl != null ? `${upnl >= 0 ? '+' : ''}$${formatMoney(upnl)}` : '--';
-            upnlEl.style.color = pnlColor(upnl);
-            document.getElementById('acct-margin-used').textContent = acct.margin_used != null ? `$${formatMoney(acct.margin_used)}` : '--';
-            document.getElementById('acct-margin-avail').textContent = acct.margin_available != null ? `$${formatMoney(acct.margin_available)} available` : '-- available';
-
-            // Open positions
-            const positions = data.open_positions || [];
-            const posBody = document.getElementById('positions-body');
-            const posEmpty = document.getElementById('positions-empty');
-            if (positions.length === 0) {
-                posBody.innerHTML = '';
-                posEmpty.style.display = 'block';
-            } else {
-                posEmpty.style.display = 'none';
-                posBody.innerHTML = positions.map(p => {
-                    const dirClass = p.units >= 0 ? 'buy' : 'sell';
-                    const dirLabel = p.units >= 0 ? 'BUY' : 'SELL';
-                    const upnlVal = Number(p.unrealized_pnl);
-                    return `<tr>
-                        <td><span class="tag ${dirClass}">${dirLabel}</span> ${p.instrument}</td>
-                        <td>${formatUnits(p.units)}</td>
-                        <td>${formatMoney(p.open_price, 3)}</td>
-                        <td style="color: ${pnlColor(upnlVal)}">${upnlVal >= 0 ? '+' : ''}$${formatMoney(upnlVal)}</td>
-                        <td style="color: var(--red)">${p.stop_loss != null ? formatMoney(p.stop_loss, 3) : '--'}</td>
-                        <td style="color: var(--green)">${p.take_profit != null ? formatMoney(p.take_profit, 3) : '--'}</td>
-                        <td style="font-size: 11px; color: var(--text-dim);">${p.trade_id}</td>
-                    </tr>`;
-                }).join('');
-            }
-        }
-
-        // Recent orders (shown regardless of broker state)
-        const orders = data.recent_orders || [];
-        const ordBody = document.getElementById('orders-body');
-        const ordEmpty = document.getElementById('orders-empty');
-        if (orders.length === 0) {
-            ordBody.innerHTML = '';
-            ordEmpty.style.display = 'block';
-        } else {
-            ordEmpty.style.display = 'none';
-            ordBody.innerHTML = orders.map(o => `<tr>
-                <td style="color: var(--text-dim); font-size: 11px;">#${o.signal_id}</td>
-                <td>${o.instrument}</td>
-                <td>${formatUnits(o.units)}</td>
-                <td>${o.fill_price != null ? formatMoney(o.fill_price, 3) : '--'}</td>
-                <td>${modeBadgeTag(o.mode)}</td>
-                <td>${orderStatusTag(o.status)}${o.error_detail ? `<span title="${o.error_detail}" style="cursor: help; color: var(--text-dim); font-size: 10px;"> (?)</span>` : ''}</td>
-                <td style="font-size: 11px; color: var(--text-dim);">${o.created_at ? formatDateTime(o.created_at) : '--'}</td>
-            </tr>`).join('');
-        }
-
-    } catch (err) {
-        console.error('Portfolio refresh failed:', err);
-    }
-}
-
-// ============================
 // TAB SWITCHING
 // ============================
 (function initTabs() {
@@ -2136,10 +1889,6 @@ async function refreshPortfolio() {
             btn.setAttribute('aria-selected', 'true');
             const panel = document.getElementById(`tab-${target}`);
             if (panel) panel.classList.add('active');
-            // Lazy-load portfolio on first open; refresh on subsequent opens
-            if (target === 'portfolio') {
-                refreshPortfolio();
-            }
         });
     });
 })();
@@ -2148,13 +1897,11 @@ async function refreshPortfolio() {
 refreshDashboard();
 refreshPrice();
 refreshChart();
-refreshPortfolio();
 
 // Auto-refresh every 30s
 setInterval(refreshDashboard, 30000);
 setInterval(refreshPrice, 30000);
 setInterval(refreshChart, 60000);
-setInterval(refreshPortfolio, 30000);
 </script>
 
 </body>

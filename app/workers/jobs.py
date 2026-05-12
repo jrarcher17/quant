@@ -442,11 +442,6 @@ async def run_signal_scanner() -> None:
             )
             signals = await pipeline.run(session)
 
-            # Place broker orders for new signals (errors isolated per-signal)
-            if signals:
-                from app.services.broker.executor import OrderExecutor
-                await OrderExecutor().execute_signals(session, signals)
-
             # Send notifications for new signals (fire-and-forget)
             if signals:
                 settings = get_settings()
@@ -500,16 +495,11 @@ async def check_outcomes() -> None:
             outcomes = await detector.check_outcomes(session)
 
             if outcomes:
-                # Send notifications for each outcome and sync broker positions
-                from app.services.broker.executor import PositionSyncer
-                position_syncer = PositionSyncer()
-
+                # Send notifications for each outcome
                 for outcome in outcomes:
                     signal = await session.get(Signal, outcome.signal_id)
                     if signal:
                         await _notify_outcome(settings, signal, outcome)
-                        # Close the corresponding broker trade if one exists
-                        await position_syncer.sync_closed(session, signal)
 
                 # Run feedback checks (degradation detection, circuit breaker)
                 from app.services.feedback_controller import FeedbackController

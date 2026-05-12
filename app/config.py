@@ -41,14 +41,6 @@ class Settings(BaseSettings):
     better_auth_seed_users: str = ""
     better_auth_database_url: str = ""
 
-    # OANDA broker integration (optional -- system works without these configured)
-    # Set oanda_enabled=true to activate order execution.
-    # oanda_mode: "practice" for paper trading, "live" for real money.
-    oanda_enabled: bool = False
-    oanda_mode: str = "practice"  # "practice" | "live"
-    oanda_api_token: str = ""
-    oanda_account_id: str = ""
-
     # Telegram (optional -- system works without these configured)
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
