@@ -14,7 +14,7 @@ import pandas as pd
 
 from typing import ClassVar
 
-from app.strategies.base import BaseStrategy, CandidateSignal, Direction
+from app.strategies.base import BaseStrategy, CandidateSignal, Direction, get_pip_value
 from app.strategies.helpers import (
     compute_atr,
     compute_ema,
@@ -53,7 +53,7 @@ class TrendContinuationStrategy(BaseStrategy):
         "ATR_LENGTH": 14,
         "PULLBACK_ATR_MULT": 1.5,
         "SL_ATR_MULT": 1.5,
-        "MIN_SL_PRICE": 10.0,
+        "MIN_SL_PIPS": 100.0,
         "TP1_RR": 2.0,
         "TP2_RR": 3.0,
         "LOOKBACK_PULLBACK": 8,
@@ -64,7 +64,7 @@ class TrendContinuationStrategy(BaseStrategy):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def analyze(self, candles: pd.DataFrame) -> list[CandidateSignal]:
+    def analyze(self, candles: pd.DataFrame, symbol: str = "XAUUSD") -> list[CandidateSignal]:
         """Scan *candles* for trend continuation pullback setups.
 
         Args:
@@ -144,7 +144,7 @@ class TrendContinuationStrategy(BaseStrategy):
                     i, n, ema50_val, atr_val, ema200_val,
                     opens, highs, lows, closes, timestamps,
                     vwap, has_vwap, swing_high_indices,
-                    ts,
+                    ts, symbol,
                 )
                 if signal is not None:
                     signals.append(signal)
@@ -154,7 +154,7 @@ class TrendContinuationStrategy(BaseStrategy):
                     i, n, ema50_val, atr_val, ema200_val,
                     opens, highs, lows, closes, timestamps,
                     vwap, has_vwap, swing_low_indices,
-                    ts,
+                    ts, symbol,
                 )
                 if signal is not None:
                     signals.append(signal)
@@ -180,6 +180,7 @@ class TrendContinuationStrategy(BaseStrategy):
         has_vwap: bool,
         swing_high_indices: np.ndarray,
         ts: datetime,
+        symbol: str = "XAUUSD",
     ) -> CandidateSignal | None:
         """Check for a bullish trend continuation at bar *i*."""
         close_val = float(closes[i])
@@ -228,11 +229,11 @@ class TrendContinuationStrategy(BaseStrategy):
         # Stop loss below pullback low minus SL_ATR_MULT * ATR
         sl = pullback_low - self.params["SL_ATR_MULT"] * atr_val
 
-        # Enforce minimum SL distance: max of ATR-based and absolute floor
+        # Enforce minimum SL distance: max of ATR-based and pip floor
         risk_dist = abs(entry - sl)
         min_risk = max(
             self.params["SL_ATR_MULT"] * atr_val,
-            self.params["MIN_SL_PRICE"],
+            self.params["MIN_SL_PIPS"] * get_pip_value(symbol),
         )
         if risk_dist < min_risk:
             sl = entry - min_risk
@@ -283,7 +284,7 @@ class TrendContinuationStrategy(BaseStrategy):
 
         return CandidateSignal(
             strategy_name=self.name,
-            symbol="XAUUSD",
+            symbol=symbol,
             timeframe=self.required_timeframes[0],
             direction=Direction.BUY,
             entry_price=Decimal(str(round(entry, 2))),
@@ -316,6 +317,7 @@ class TrendContinuationStrategy(BaseStrategy):
         has_vwap: bool,
         swing_low_indices: np.ndarray,
         ts: datetime,
+        symbol: str = "XAUUSD",
     ) -> CandidateSignal | None:
         """Check for a bearish trend continuation at bar *i*."""
         close_val = float(closes[i])
@@ -363,11 +365,11 @@ class TrendContinuationStrategy(BaseStrategy):
         # Stop loss above pullback high plus SL_ATR_MULT * ATR
         sl = pullback_high + self.params["SL_ATR_MULT"] * atr_val
 
-        # Enforce minimum SL distance: max of ATR-based and absolute floor
+        # Enforce minimum SL distance: max of ATR-based and pip floor
         risk_dist = abs(sl - entry)
         min_risk = max(
             self.params["SL_ATR_MULT"] * atr_val,
-            self.params["MIN_SL_PRICE"],
+            self.params["MIN_SL_PIPS"] * get_pip_value(symbol),
         )
         if risk_dist < min_risk:
             sl = entry + min_risk
@@ -418,7 +420,7 @@ class TrendContinuationStrategy(BaseStrategy):
 
         return CandidateSignal(
             strategy_name=self.name,
-            symbol="XAUUSD",
+            symbol=symbol,
             timeframe=self.required_timeframes[0],
             direction=Direction.SELL,
             entry_price=Decimal(str(round(entry, 2))),

@@ -14,6 +14,7 @@ from app.config import get_settings
 from app.models.candle import Candle
 from app.models.signal import Signal
 from app.services.trade_settings import get_trade_settings
+from app.strategies.base import get_pip_value as _get_pip_value
 
 # ---------------------------------------------------------------------------
 # Configuration constants
@@ -22,7 +23,6 @@ from app.services.trade_settings import get_trade_settings
 MIN_RR: float = 1.3  # Minimum risk:reward ratio (1:1.3)
 MIN_CONFIDENCE: float = 60.0  # Minimum confidence threshold (%)
 MAX_SL_PIPS: float = 800.0  # Max stop loss distance (pips); ~$80 ≈ 1.5% at XAU $5,300
-PIP_VALUE: float = 0.10  # XAUUSD: $0.10 price movement per pip
 DEDUP_WINDOW_HOURS: int = 2  # Same-direction dedup window (hours)
 # Statuses counted for dedup — includes closed signals to prevent re-entry
 # into the same direction immediately after a loss
@@ -119,7 +119,8 @@ class SignalGenerator:
         # 2. Query latest candles for the strategy's primary timeframe
         primary_tf = strategy.required_timeframes[0]
         limit = strategy.min_candles + 50  # Extra buffer
-        symbol = get_settings().trading_symbol
+        ts_settings = await get_trade_settings(session)
+        symbol = ts_settings.trading_symbol or get_settings().trading_symbol
 
         stmt = (
             select(Candle)
@@ -148,7 +149,7 @@ class SignalGenerator:
 
         # 4. Run strategy analysis
         try:
-            candidates: list[CandidateSignal] = strategy.analyze(df)
+            candidates: list[CandidateSignal] = strategy.analyze(df, symbol=symbol)
         except InsufficientDataError as exc:
             logger.warning(
                 "Insufficient data for strategy '{}': {}",
@@ -320,7 +321,7 @@ class SignalGenerator:
 
             # --- Filter 2: Max SL distance ---
             sl_dist = abs(float(candidate.entry_price) - float(candidate.stop_loss))
-            sl_pips = sl_dist / PIP_VALUE
+            sl_pips = sl_dist / _get_pip_value(candidate.symbol)
             if sl_pips > trade_settings.max_sl_pips:
                 logger.info(
                     "Signal rejected: SL {:.0f} pips exceeds max {:.0f} pips",
@@ -468,7 +469,7 @@ class SignalGenerator:
         # numeric domain end-to-end (Signal.entry_price is Numeric(10,2)).
         from decimal import Decimal as _Decimal
 
-        max_price_distance = _Decimal(str(round(distance_pips * PIP_VALUE, 2)))
+        max_price_distance = _Decimal(str(round(distance_pips * _get_pip_value(candidate.symbol), 2)))
         stmt2 = (
             select(Signal.entry_price)
             .where(
@@ -486,7 +487,7 @@ class SignalGenerator:
         if nearest is not None:
             delta_pips = abs(
                 float(candidate.entry_price) - float(nearest)
-            ) / PIP_VALUE
+            ) / _get_pip_value(candidate.symbol)
             return (
                 f"active same-direction signal at {nearest} "
                 f"({delta_pips:.1f} pips away, threshold {distance_pips:.1f})"

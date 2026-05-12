@@ -25,6 +25,7 @@ from app.services.failure_tracker import FailureTracker
 from app.services.outcome_detector import OutcomeDetector
 from app.services.signal_notifier import SignalNotifier
 from app.services.telegram_notifier import TelegramNotifier
+from app.services.trade_settings import get_trade_settings
 
 
 def _telegram_notifier(settings) -> TelegramNotifier:
@@ -93,10 +94,11 @@ async def refresh_candles(timeframe: str) -> None:
     job_id = f"refresh_candles_{timeframe}"
     try:
         settings = get_settings()
-        symbol = settings.trading_symbol
         ingestor = CandleIngestor(api_key=settings.twelve_data_api_key)
 
         async with async_session_factory() as session:
+            trade_settings = await get_trade_settings(session)
+            symbol = trade_settings.trading_symbol
             count = await ingestor.fetch_and_store(session, symbol, timeframe)
 
             # Check for gaps in the last 7 days
@@ -168,7 +170,7 @@ async def run_daily_backtests() -> None:
         async with async_session_factory() as session:
             # Query last 90 days of H1 candles (enough for 60d window + buffer)
             from datetime import timezone as tz
-            symbol = get_settings().trading_symbol
+            symbol = (await get_trade_settings(session)).trading_symbol
             cutoff = datetime.now(tz.utc) - timedelta(days=90)
             stmt = (
                 select(Candle)
@@ -244,7 +246,7 @@ async def run_daily_backtests() -> None:
                 for window_days in [7, 14, 30, 60]:
                     try:
                         metrics, trades = runner.run_full_backtest(
-                            strategy, df, window_days
+                            strategy, df, window_days, symbol=symbol
                         )
 
                         if metrics.total_trades == 0:
@@ -287,7 +289,7 @@ async def run_daily_backtests() -> None:
 
                 # Run walk-forward validation
                 try:
-                    wf_result = wf_validator.validate(strategy, df, window_days=30)
+                    wf_result = wf_validator.validate(strategy, df, window_days=30, symbol=symbol)
 
                     if wf_result.oos_metrics.total_trades == 0:
                         logger.info(
@@ -646,7 +648,7 @@ async def send_health_digest() -> None:
 
             # Count candles per timeframe
             candle_counts: dict[str, int] = {}
-            symbol = get_settings().trading_symbol
+            symbol = (await get_trade_settings(session)).trading_symbol
             for tf in ["M15", "H1", "H4", "D1"]:
                 stmt = select(func.count()).select_from(Candle).where(
                     Candle.symbol == symbol,
@@ -731,7 +733,7 @@ async def run_param_optimization() -> None:
         async with async_session_factory() as session:
             # Load last 90 days of H1 candles (enough for optimization)
             from datetime import datetime, timedelta, timezone as tz
-            symbol = get_settings().trading_symbol
+            symbol = (await get_trade_settings(session)).trading_symbol
             cutoff = datetime.now(tz.utc) - timedelta(days=90)
             stmt = (
                 select(Candle)
@@ -781,7 +783,7 @@ async def run_param_optimization() -> None:
                     continue
 
                 try:
-                    opt_result = await optimizer.optimize_strategy(strategy_name, df)
+                    opt_result = await optimizer.optimize_strategy(strategy_name, df, symbol=symbol)
 
                     if opt_result is None:
                         logger.info(

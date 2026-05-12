@@ -44,6 +44,7 @@ class BacktestRunner:
         candles: pd.DataFrame,
         window_days: int,
         step_days: int = 1,
+        symbol: str = "XAUUSD",
     ) -> list[SimulatedTrade]:
         """Run a strategy on rolling windows and collect simulated trades.
 
@@ -84,7 +85,7 @@ class BacktestRunner:
             window = candles.iloc[start_idx:end_idx].reset_index(drop=True)
 
             try:
-                signals = strategy.analyze(window)
+                signals = strategy.analyze(window, symbol=symbol)
             except InsufficientDataError:
                 logger.debug(
                     f"Skipping window at idx {start_idx}: insufficient data "
@@ -117,6 +118,7 @@ class BacktestRunner:
         candles: pd.DataFrame,
         window_days: int,
         step_days: int = 1,
+        symbol: str = "XAUUSD",
     ) -> tuple[BacktestMetrics, list[SimulatedTrade]]:
         """Run a rolling backtest and compute aggregate metrics.
 
@@ -132,7 +134,7 @@ class BacktestRunner:
         Returns:
             Tuple of (BacktestMetrics, list[SimulatedTrade]).
         """
-        trades = self.run_rolling_backtest(strategy, candles, window_days, step_days)
+        trades = self.run_rolling_backtest(strategy, candles, window_days, step_days, symbol=symbol)
         metrics = self.metrics_calculator.compute(trades)
 
         logger.info(

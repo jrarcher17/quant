@@ -14,7 +14,7 @@ import pandas as pd
 
 from typing import ClassVar
 
-from app.strategies.base import BaseStrategy, CandidateSignal, Direction
+from app.strategies.base import BaseStrategy, CandidateSignal, Direction, get_pip_value
 from app.strategies.helpers import (
     compute_atr,
     detect_swing_highs,
@@ -51,7 +51,7 @@ class LiquiditySweepStrategy(BaseStrategy):
         "CONFIRM_BARS": 8,
         "SL_ATR_MULT": 1.5,
         "MIN_RISK_ATR": 1.5,
-        "MIN_SL_PRICE": 10.0,
+        "MIN_SL_PIPS": 100.0,
         "TP1_RR": 1.5,
         "TP2_RR": 3.0,
         "BASE_CONFIDENCE": 50,
@@ -60,7 +60,7 @@ class LiquiditySweepStrategy(BaseStrategy):
     # -----------------------------------------------------------------
     # Public API
     # -----------------------------------------------------------------
-    def analyze(self, candles: pd.DataFrame) -> list[CandidateSignal]:
+    def analyze(self, candles: pd.DataFrame, symbol: str = "XAUUSD") -> list[CandidateSignal]:
         """Scan *candles* for liquidity sweep setups.
 
         Args:
@@ -121,7 +121,7 @@ class LiquiditySweepStrategy(BaseStrategy):
 
             # --- Bullish sweep detection ---
             signal = self._check_bullish_sweep(
-                i, n, recent_sl, lows, highs, closes, timestamps, atr_val, ts
+                i, n, recent_sl, lows, highs, closes, timestamps, atr_val, ts, symbol
             )
             if signal is not None:
                 signals.append(signal)
@@ -129,7 +129,7 @@ class LiquiditySweepStrategy(BaseStrategy):
 
             # --- Bearish sweep detection ---
             signal = self._check_bearish_sweep(
-                i, n, recent_sh, lows, highs, closes, timestamps, atr_val, ts
+                i, n, recent_sh, lows, highs, closes, timestamps, atr_val, ts, symbol
             )
             if signal is not None:
                 signals.append(signal)
@@ -150,6 +150,7 @@ class LiquiditySweepStrategy(BaseStrategy):
         timestamps: np.ndarray,
         atr_val: float,
         sweep_ts: datetime,
+        symbol: str = "XAUUSD",
     ) -> CandidateSignal | None:
         """Check for a bullish liquidity sweep at bar *i*.
 
@@ -193,10 +194,10 @@ class LiquiditySweepStrategy(BaseStrategy):
         sl = float(lows[i]) - self.params["SL_ATR_MULT"] * atr_val
         risk_dist = abs(entry - sl)
 
-        # Enforce minimum SL distance: max of ATR-based and absolute floor
+        # Enforce minimum SL distance: max of ATR-based and pip floor
         min_risk = max(
             self.params["MIN_RISK_ATR"] * atr_val,
-            self.params["MIN_SL_PRICE"],
+            self.params["MIN_SL_PIPS"] * get_pip_value(symbol),
         )
         if risk_dist < min_risk:
             sl = entry - min_risk
@@ -232,7 +233,7 @@ class LiquiditySweepStrategy(BaseStrategy):
 
         return CandidateSignal(
             strategy_name=self.name,
-            symbol="XAUUSD",
+            symbol=symbol,
             timeframe=self.required_timeframes[0],
             direction=Direction.BUY,
             entry_price=Decimal(str(round(entry, 2))),
@@ -257,6 +258,7 @@ class LiquiditySweepStrategy(BaseStrategy):
         timestamps: np.ndarray,
         atr_val: float,
         sweep_ts: datetime,
+        symbol: str = "XAUUSD",
     ) -> CandidateSignal | None:
         """Check for a bearish liquidity sweep at bar *i*.
 
@@ -299,10 +301,10 @@ class LiquiditySweepStrategy(BaseStrategy):
         sl = float(highs[i]) + self.params["SL_ATR_MULT"] * atr_val
         risk_dist = abs(sl - entry)
 
-        # Enforce minimum SL distance: max of ATR-based and absolute floor
+        # Enforce minimum SL distance: max of ATR-based and pip floor
         min_risk = max(
             self.params["MIN_RISK_ATR"] * atr_val,
-            self.params["MIN_SL_PRICE"],
+            self.params["MIN_SL_PIPS"] * get_pip_value(symbol),
         )
         if risk_dist < min_risk:
             sl = entry + min_risk
@@ -338,7 +340,7 @@ class LiquiditySweepStrategy(BaseStrategy):
 
         return CandidateSignal(
             strategy_name=self.name,
-            symbol="XAUUSD",
+            symbol=symbol,
             timeframe=self.required_timeframes[0],
             direction=Direction.SELL,
             entry_price=Decimal(str(round(entry, 2))),
