@@ -502,8 +502,7 @@ async def dashboard_portfolio(session: AsyncSession = Depends(get_session)):
     )
 
     settings = get_settings()
-    ts = await get_trade_settings(session)
-    symbol = ts.trading_symbol or settings.trading_symbol
+    symbol = settings.trading_symbol
 
     live_price_dec: Decimal | None = None
     try:

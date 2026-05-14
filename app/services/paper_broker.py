@@ -64,10 +64,12 @@ async def get_account_summary(session: AsyncSession) -> dict:
     )
     closed_trades = closed_result.scalars().all()
 
-    # Wins = trades that closed on tp1/tp2 (any TP hit = win)
+    # Wins = TP closes, or expired/manual closes with positive P&L
     wins = sum(
         1 for t in closed_trades
-        if t.close_reason in ("tp1", "tp2") or t.tp1_hit
+        if t.close_reason in ("tp1", "tp2")
+        or t.tp1_hit
+        or (t.close_reason in ("expired", "manual") and t.realized_pnl_usd > 0)
     )
     losses = sum(1 for t in closed_trades if t.close_reason == "sl")
     breakevens = sum(1 for t in closed_trades if t.close_reason == "be")
@@ -242,6 +244,58 @@ async def check_open_positions(session: AsyncSession, live_price: Decimal) -> No
             )
 
     await session.commit()
+
+
+async def expire_stale_paper_trades(session: AsyncSession, live_price: Decimal) -> None:
+    """Close open paper trades whose linked signal has expired, at live_price.
+
+    Called from check_paper_trades after the normal TP/SL evaluation so that
+    positions are not left dangling after a signal expires without hitting
+    TP or SL.
+    """
+    now = datetime.now(UTC)
+
+    result = await session.execute(
+        select(PaperTrade).where(PaperTrade.status == "open")
+    )
+    open_trades = result.scalars().all()
+    if not open_trades:
+        return
+
+    account = await get_or_create_account(session)
+    closed_count = 0
+
+    for trade in open_trades:
+        if trade.signal_id is None:
+            continue
+        signal = await session.get(Signal, trade.signal_id)
+        if signal is None:
+            continue
+
+        is_expired = signal.status == "expired" or (
+            signal.expires_at is not None and signal.expires_at <= now
+        )
+        if not is_expired:
+            continue
+
+        final_pnl = _calc_pnl(trade.direction, trade.entry_price, live_price, trade.current_units)
+        total_pnl = (trade.tp1_pnl_usd or Decimal("0")) + final_pnl
+
+        trade.close_price = live_price
+        trade.close_reason = "expired"
+        trade.closed_at = now
+        trade.status = "closed"
+        trade.realized_pnl_usd = total_pnl
+        account.balance = (account.balance + final_pnl).quantize(Decimal("0.01"))
+        closed_count += 1
+
+        logger.info(
+            "paper_broker: trade {} expired @ {} pnl=${} (signal {})",
+            trade.id, float(live_price), float(total_pnl), trade.signal_id,
+        )
+
+    if closed_count:
+        await session.commit()
 
 
 # ---------------------------------------------------------------------------

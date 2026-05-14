@@ -891,8 +891,11 @@ async def check_paper_trades() -> None:
     each open position against SL / TP1 / TP2 levels.
     """
     try:
-        from app.services.paper_broker import check_open_positions, fetch_live_price
-        from app.services.trade_settings import get_trade_settings as _gts
+        from app.services.paper_broker import (
+            check_open_positions,
+            expire_stale_paper_trades,
+            fetch_live_price,
+        )
         from sqlalchemy import select
         from app.models.paper_trade import PaperTrade
 
@@ -905,8 +908,7 @@ async def check_paper_trades() -> None:
             if not result.scalar_one_or_none():
                 return
 
-            ts = await _gts(session)
-            symbol = ts.trading_symbol if hasattr(ts, "trading_symbol") else settings.trading_symbol
+            symbol = settings.trading_symbol
 
             live_price = await fetch_live_price(symbol, settings.twelve_data_api_key)
             if live_price is None:
@@ -914,6 +916,7 @@ async def check_paper_trades() -> None:
                 return
 
             await check_open_positions(session, live_price)
+            await expire_stale_paper_trades(session, live_price)
             logger.debug("check_paper_trades: checked positions @ {}", float(live_price))
 
         FailureTracker.record_success("check_paper_trades")
