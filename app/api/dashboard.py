@@ -7,7 +7,7 @@ import httpx
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import case, func, select
+from sqlalchemy import case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -527,3 +527,30 @@ async def dashboard_portfolio(session: AsyncSession = Depends(get_session)):
         "open_trades": open_trades,
         "history": history,
     }
+
+
+@router.post("/paper/reset")
+async def paper_reset(session: AsyncSession = Depends(get_session)):
+    """Wipe all paper trades and reset the account balance to the starting balance."""
+    from app.models.paper_trade import PaperAccount, PaperTrade
+    from app.services.paper_broker import _STARTING_BALANCE, _PAPER_BALANCE_ID
+
+    await session.execute(delete(PaperTrade))
+
+    result = await session.execute(
+        select(PaperAccount).where(PaperAccount.id == _PAPER_BALANCE_ID)
+    )
+    account = result.scalar_one_or_none()
+    if account:
+        account.balance = _STARTING_BALANCE
+        account.starting_balance = _STARTING_BALANCE
+    else:
+        account = PaperAccount(
+            id=_PAPER_BALANCE_ID,
+            starting_balance=_STARTING_BALANCE,
+            balance=_STARTING_BALANCE,
+        )
+        session.add(account)
+
+    await session.commit()
+    return {"status": "reset", "balance": float(_STARTING_BALANCE)}

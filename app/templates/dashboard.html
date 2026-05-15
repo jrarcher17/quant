@@ -833,8 +833,12 @@
 
         <!-- PAPER TRADING (full width, where chart used to be) -->
         <div class="card" style="margin-bottom:24px;">
-            <div class="card-header">
-                <div class="card-title">Paper Trading</div>
+            <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+                <div>
+                    <div class="card-title">Paper Trading</div>
+                    <div style="font-size:10px;color:var(--text-dim);margin-top:2px;">Simulating IB Micro Gold Futures (MGC) · 10 oz/contract · $10/pt</div>
+                </div>
+                <button id="paper-reset-btn" onclick="resetPaperAccount()" style="font-size:11px;padding:4px 12px;background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.35);color:#ef4444;border-radius:4px;cursor:pointer;letter-spacing:0.5px;">Reset Account</button>
             </div>
             <div class="card-body">
                 <!-- Account summary cards -->
@@ -853,7 +857,7 @@
                     <table class="table" id="paper-open-table">
                         <thead><tr>
                             <th>Dir</th><th>Symbol</th><th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th>
-                            <th>Units</th><th>TP1 Hit</th><th>Unreal P&amp;L</th><th>Opened</th>
+                            <th>Contracts</th><th>TP1 Hit</th><th>Unreal P&amp;L</th><th>Opened</th>
                         </tr></thead>
                         <tbody id="paper-open-body"></tbody>
                     </table>
@@ -1766,7 +1770,7 @@ async function refreshPortfolio() {
                     <td style="color:var(--red)">${t.stop_loss}</td>
                     <td style="color:var(--green)">${t.take_profit_1}</td>
                     <td style="color:var(--green)">${t.take_profit_2}</td>
-                    <td>${Number(t.units).toFixed(4)}</td>
+                    <td>${t.contracts ?? Math.round(t.units / 10)}</td>
                     <td>${tp1Badge}</td>
                     <td style="color:${upnlColor};font-weight:600;">${upnlStr}</td>
                     <td style="color:var(--text-dim);font-size:11px;">${fmtDate(t.opened_at)}</td>
@@ -1806,6 +1810,24 @@ async function refreshPortfolio() {
         }
     } catch (err) {
         console.error('Failed to load portfolio:', err);
+    }
+}
+
+async function resetPaperAccount() {
+    if (!confirm('Reset paper account? This will wipe all trades and restore the $2,000 starting balance.')) return;
+    const btn = document.getElementById('paper-reset-btn');
+    btn.disabled = true;
+    btn.textContent = 'Resetting…';
+    try {
+        const resp = await fetch('/dashboard/paper/reset', { method: 'POST' });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        await refreshPortfolio();
+    } catch (err) {
+        console.error('Reset failed:', err);
+        alert('Reset failed — check console.');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Reset Account';
     }
 }
 

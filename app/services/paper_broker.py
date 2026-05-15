@@ -1,15 +1,17 @@
-"""Internal paper trading broker.
+"""Internal paper trading broker — simulates IB Micro Gold Futures (MGC).
 
-Opens trades from signals at current market price, monitors open positions
-every few minutes against live price, and closes them at TP1 (50% + move SL
-to breakeven), TP2, or SL.
+Instrument: CME Micro Gold Futures (MGC)
+    Contract size : 10 troy oz per contract
+    Tick size     : $0.10 per oz  →  $1.00 per tick per contract
+    1-point move  : $10.00 per contract
 
-Position sizing:
-    units = risk_usd / |entry_price - stop_loss|
+Position sizing (whole contracts only):
+    contracts = floor(risk_usd / (sl_distance_pts * OZ_PER_CONTRACT))
+    units     = contracts * OZ_PER_CONTRACT   (stored in oz for P&L maths)
 
 P&L:
-    BUY:  pnl = (close_price - entry_price) * units
-    SELL: pnl = (entry_price - close_price) * units
+    BUY:  pnl = (close_price - entry_price) * units_oz
+    SELL: pnl = (entry_price - close_price) * units_oz
 """
 
 from __future__ import annotations
@@ -27,7 +29,11 @@ from app.models.paper_trade import PaperAccount, PaperTrade
 from app.models.signal import Signal
 
 _PAPER_BALANCE_ID = 1
-_STARTING_BALANCE = Decimal("1000.00")
+_STARTING_BALANCE = Decimal("2000.00")
+
+# MGC (Micro Gold Futures) — 10 troy oz per contract, $10/pt per contract
+_OZ_PER_CONTRACT = Decimal("10")
+_MIN_CONTRACTS = Decimal("1")  # always trade at least 1 contract regardless of account size
 
 
 # ---------------------------------------------------------------------------
@@ -124,9 +130,12 @@ async def open_trade_from_signal(
         logger.warning("paper_broker: zero SL distance for signal {}, skipping", signal.id)
         return None
 
-    units = (risk_usd / sl_distance).quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-    if units <= 0:
-        return None
+    # Size in whole MGC contracts; floor to nearest contract, minimum 1
+    contracts = max(
+        (risk_usd / (sl_distance * _OZ_PER_CONTRACT)).to_integral_value(rounding=ROUND_DOWN),
+        _MIN_CONTRACTS,
+    )
+    units = contracts * _OZ_PER_CONTRACT
 
     trade = PaperTrade(
         signal_id=signal.id,
@@ -145,9 +154,9 @@ async def open_trade_from_signal(
     session.add(trade)
     await session.flush()
     logger.info(
-        "paper_broker: opened trade {} {} {} @ {} units={} risk=${}",
+        "paper_broker: opened trade {} {} {} @ {} contracts={} units={}oz risk=${}",
         trade.id, signal.direction, signal.symbol,
-        float(entry), float(units), float(risk_usd),
+        float(entry), int(contracts), float(units), float(risk_usd),
     )
     return trade
 
@@ -341,6 +350,7 @@ async def get_open_trades(session: AsyncSession, live_price: Decimal | None = No
             "take_profit_1": float(t.take_profit_1),
             "take_profit_2": float(t.take_profit_2),
             "units": float(t.current_units),
+            "contracts": int(t.current_units / _OZ_PER_CONTRACT),
             "risk_usd": float(t.risk_amount_usd),
             "tp1_hit": t.tp1_hit,
             "unrealised_pnl": unrealised,
