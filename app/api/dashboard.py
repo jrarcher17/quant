@@ -554,3 +554,37 @@ async def paper_reset(session: AsyncSession = Depends(get_session)):
 
     await session.commit()
     return {"status": "reset", "balance": float(_STARTING_BALANCE)}
+
+
+@router.post("/signals/reset")
+async def signals_reset(session: AsyncSession = Depends(get_session)):
+    """Delete all signals and their outcomes."""
+    from app.models.outcome import Outcome
+    from app.models.signal import Signal
+
+    outcomes_deleted = (await session.execute(delete(Outcome))).rowcount
+    signals_deleted = (await session.execute(delete(Signal))).rowcount
+    await session.commit()
+    return {"status": "reset", "signals_deleted": signals_deleted, "outcomes_deleted": outcomes_deleted}
+
+
+@router.post("/backtests/reset")
+async def backtests_reset(session: AsyncSession = Depends(get_session)):
+    """Delete all backtest results and optimized parameters."""
+    from app.models.backtest_result import BacktestResult
+    from app.models.optimized_params import OptimizedParams
+
+    params_deleted = (await session.execute(delete(OptimizedParams))).rowcount
+    backtests_deleted = (await session.execute(delete(BacktestResult))).rowcount
+    await session.commit()
+    return {"status": "reset", "backtests_deleted": backtests_deleted, "params_deleted": params_deleted}
+
+
+@router.post("/performance/reset")
+async def performance_reset(session: AsyncSession = Depends(get_session)):
+    """Delete all strategy performance records."""
+    from app.models.strategy_performance import StrategyPerformance
+
+    deleted = (await session.execute(delete(StrategyPerformance))).rowcount
+    await session.commit()
+    return {"status": "reset", "records_deleted": deleted}
