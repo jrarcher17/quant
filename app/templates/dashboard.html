@@ -884,29 +884,22 @@
 
         <!-- TABBED PANEL: Recent Signals / Strategies / Backtest / Walk-Forward / Optimized Params -->
         <div class="card tabs-card">
-            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
-                <div class="tabs-header" role="tablist" style="flex:1;min-width:0;">
-                    <button class="tab-btn active" role="tab" aria-selected="true" aria-controls="tab-signals" data-tab="signals">
-                        Recent Signals<span class="tab-badge" id="signal-count">0</span>
-                    </button>
-                    <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-strategies" data-tab="strategies">
-                        Strategies<span class="tab-badge" id="strategy-count">0</span>
-                    </button>
-                    <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-backtest" data-tab="backtest">
-                        Backtest Results<span class="tab-badge" id="bt-total" style="background: var(--accent-dim); color: var(--accent);">0</span>
-                    </button>
-                    <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-walkforward" data-tab="walkforward">
-                        Walk-Forward Validation
-                    </button>
-                    <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-optimized" data-tab="optimized">
-                        Optimized Parameters
-                    </button>
-                </div>
-                <div style="display:flex;gap:6px;padding:0 4px;flex-shrink:0;">
-                    <button onclick="resetData('signals')" style="font-size:10px;padding:3px 9px;background:rgba(239,68,68,0.10);border:1px solid rgba(239,68,68,0.30);color:#ef4444;border-radius:4px;cursor:pointer;white-space:nowrap;">Reset Signals</button>
-                    <button onclick="resetData('backtests')" style="font-size:10px;padding:3px 9px;background:rgba(239,68,68,0.10);border:1px solid rgba(239,68,68,0.30);color:#ef4444;border-radius:4px;cursor:pointer;white-space:nowrap;">Reset Backtests</button>
-                    <button onclick="resetData('performance')" style="font-size:10px;padding:3px 9px;background:rgba(239,68,68,0.10);border:1px solid rgba(239,68,68,0.30);color:#ef4444;border-radius:4px;cursor:pointer;white-space:nowrap;">Reset Performance</button>
-                </div>
+            <div class="tabs-header" role="tablist">
+                <button class="tab-btn active" role="tab" aria-selected="true" aria-controls="tab-signals" data-tab="signals">
+                    Recent Signals<span class="tab-badge" id="signal-count">0</span>
+                </button>
+                <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-strategies" data-tab="strategies">
+                    Strategies<span class="tab-badge" id="strategy-count">0</span>
+                </button>
+                <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-backtest" data-tab="backtest">
+                    Backtest Results<span class="tab-badge" id="bt-total" style="background: var(--accent-dim); color: var(--accent);">0</span>
+                </button>
+                <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-walkforward" data-tab="walkforward">
+                    Walk-Forward Validation
+                </button>
+                <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-optimized" data-tab="optimized">
+                    Optimized Parameters
+                </button>
             </div>
 
             <!-- Recent Signals -->
