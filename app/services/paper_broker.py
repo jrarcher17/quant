@@ -77,7 +77,7 @@ async def get_account_summary(session: AsyncSession) -> dict:
         or t.tp1_hit
         or (t.close_reason in ("expired", "manual") and t.realized_pnl_usd > 0)
     )
-    losses = sum(1 for t in closed_trades if t.close_reason == "sl")
+    losses = sum(1 for t in closed_trades if t.close_reason in ("sl", "reversed"))
     breakevens = sum(1 for t in closed_trades if t.close_reason == "be")
     total_closed = len(closed_trades)
     win_rate = round(wins / total_closed * 100, 1) if total_closed else 0.0
@@ -332,10 +332,16 @@ async def fetch_live_price(symbol: str, api_key: str) -> Decimal | None:
 # ---------------------------------------------------------------------------
 
 async def get_open_trades(session: AsyncSession, live_price: Decimal | None = None) -> list[dict]:
+    from app.models.reversal_log import ReversalLog
+
     result = await session.execute(
         select(PaperTrade).where(PaperTrade.status == "open").order_by(PaperTrade.opened_at.desc())
     )
     trades = result.scalars().all()
+
+    rev_result = await session.execute(select(ReversalLog.reversal_trade_id))
+    reversal_targets = {row[0] for row in rev_result if row[0] is not None}
+
     out = []
     for t in trades:
         unrealised = None
@@ -355,11 +361,14 @@ async def get_open_trades(session: AsyncSession, live_price: Decimal | None = No
             "tp1_hit": t.tp1_hit,
             "unrealised_pnl": unrealised,
             "opened_at": t.opened_at.isoformat() if t.opened_at else None,
+            "is_reversal_target": t.id in reversal_targets,
         })
     return out
 
 
 async def get_trade_history(session: AsyncSession, limit: int = 50) -> list[dict]:
+    from app.models.reversal_log import ReversalLog
+
     result = await session.execute(
         select(PaperTrade)
         .where(PaperTrade.status == "closed")
@@ -367,6 +376,13 @@ async def get_trade_history(session: AsyncSession, limit: int = 50) -> list[dict
         .limit(limit)
     )
     trades = result.scalars().all()
+
+    # Build reversal lookup sets for display flags
+    rev_result = await session.execute(select(ReversalLog))
+    reversal_logs = rev_result.scalars().all()
+    reversal_sources = {r.original_trade_id: r.reversal_trade_id for r in reversal_logs}
+    reversal_targets = {r.reversal_trade_id for r in reversal_logs if r.reversal_trade_id}
+
     out = []
     for t in trades:
         out.append({
@@ -380,5 +396,9 @@ async def get_trade_history(session: AsyncSession, limit: int = 50) -> list[dict
             "realized_pnl_usd": float(t.realized_pnl_usd),
             "opened_at": t.opened_at.isoformat() if t.opened_at else None,
             "closed_at": t.closed_at.isoformat() if t.closed_at else None,
+            # SAR display flags
+            "is_reversal_source": t.id in reversal_sources,
+            "is_reversal_target": t.id in reversal_targets,
+            "spawned_reversal_id": reversal_sources.get(t.id),
         })
     return out

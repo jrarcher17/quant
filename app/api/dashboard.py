@@ -537,11 +537,13 @@ async def paper_reset(session: AsyncSession = Depends(get_session)):
     from app.models.optimized_params import OptimizedParams
     from app.models.outcome import Outcome
     from app.models.paper_trade import PaperAccount, PaperTrade
+    from app.models.reversal_log import ReversalLog
     from app.models.signal import Signal
     from app.models.strategy_performance import StrategyPerformance
     from app.services.paper_broker import _PAPER_BALANCE_ID, _STARTING_BALANCE
 
     # Delete in FK-safe order (children before parents)
+    await session.execute(delete(ReversalLog))
     await session.execute(delete(PaperTrade))
     await session.execute(delete(Outcome))
     await session.execute(delete(Signal))

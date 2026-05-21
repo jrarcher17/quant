@@ -896,6 +896,7 @@ async def check_paper_trades() -> None:
             expire_stale_paper_trades,
             fetch_live_price,
         )
+        from app.services.reversal_service import check_and_reverse_positions
         from sqlalchemy import select
         from app.models.paper_trade import PaperTrade
 
@@ -917,6 +918,7 @@ async def check_paper_trades() -> None:
 
             await check_open_positions(session, live_price)
             await expire_stale_paper_trades(session, live_price)
+            await check_and_reverse_positions(session, live_price)
             logger.debug("check_paper_trades: checked positions @ {}", float(live_price))
 
         FailureTracker.record_success("check_paper_trades")

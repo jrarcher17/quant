@@ -10,6 +10,7 @@ from app.models.strategy_performance import StrategyPerformance
 from app.models.optimized_params import OptimizedParams
 from app.models.trade_settings import TradeSettings
 from app.models.paper_trade import PaperAccount, PaperTrade
+from app.models.reversal_log import ReversalLog
 
 __all__ = [
     "Base",
@@ -23,4 +24,5 @@ __all__ = [
     "TradeSettings",
     "PaperAccount",
     "PaperTrade",
+    "ReversalLog",
 ]
