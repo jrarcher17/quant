@@ -531,11 +531,23 @@ async def dashboard_portfolio(session: AsyncSession = Depends(get_session)):
 
 @router.post("/paper/reset")
 async def paper_reset(session: AsyncSession = Depends(get_session)):
-    """Wipe all paper trades and reset the account balance to the starting balance."""
+    """Full reset: wipe paper trades, signals, outcomes, backtests, optimized params,
+    and strategy performance; restore paper account to starting balance."""
+    from app.models.backtest_result import BacktestResult
+    from app.models.optimized_params import OptimizedParams
+    from app.models.outcome import Outcome
     from app.models.paper_trade import PaperAccount, PaperTrade
-    from app.services.paper_broker import _STARTING_BALANCE, _PAPER_BALANCE_ID
+    from app.models.signal import Signal
+    from app.models.strategy_performance import StrategyPerformance
+    from app.services.paper_broker import _PAPER_BALANCE_ID, _STARTING_BALANCE
 
+    # Delete in FK-safe order (children before parents)
     await session.execute(delete(PaperTrade))
+    await session.execute(delete(Outcome))
+    await session.execute(delete(Signal))
+    await session.execute(delete(OptimizedParams))
+    await session.execute(delete(BacktestResult))
+    await session.execute(delete(StrategyPerformance))
 
     result = await session.execute(
         select(PaperAccount).where(PaperAccount.id == _PAPER_BALANCE_ID)

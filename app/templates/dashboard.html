@@ -1831,14 +1831,14 @@ async function resetData(type) {
 }
 
 async function resetPaperAccount() {
-    if (!confirm('Reset paper account? This will wipe all trades and restore the $2,000 starting balance.')) return;
+    if (!confirm('Full reset? This will wipe all paper trades, signals, outcomes, backtests, and strategy performance — restoring the $2,000 starting balance. This cannot be undone.')) return;
     const btn = document.getElementById('paper-reset-btn');
     btn.disabled = true;
     btn.textContent = 'Resetting…';
     try {
         const resp = await fetch('/dashboard/paper/reset', { method: 'POST' });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        await refreshPortfolio();
+        await Promise.all([refreshPortfolio(), refreshDashboard()]);
     } catch (err) {
         console.error('Reset failed:', err);
         alert('Reset failed — check console.');
