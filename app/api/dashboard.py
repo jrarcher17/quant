@@ -150,7 +150,10 @@ async def dashboard_data(
                     (Outcome.result.in_(["tp1_hit", "tp2_hit"]))
                     | ((Outcome.result == "expired") & (Outcome.pnl_pips > 0))
                 ).label("wins"),
-                func.count().filter(Outcome.result == "sl_hit").label("losses"),
+                func.count().filter(
+                    (Outcome.result == "sl_hit")
+                    | ((Outcome.result == "expired") & (Outcome.pnl_pips < 0))
+                ).label("losses"),
                 func.coalesce(func.sum(Outcome.pnl_pips), 0).label("total_pnl"),
             ).select_from(Outcome)
         )
