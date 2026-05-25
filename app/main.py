@@ -167,8 +167,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         from app.models import Base  # noqa: F401 – ensures all models are imported
         from app.database import engine as _engine
+        from app.services.schema_sync import apply_v2_schema_alters
+
         async with _engine.begin() as _conn:
             await _conn.run_sync(Base.metadata.create_all)
+        await apply_v2_schema_alters(_engine)
         logger.info("Schema sync complete")
     except Exception:
         logger.exception("Schema sync failed — continuing")
