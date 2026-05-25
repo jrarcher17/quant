@@ -832,24 +832,135 @@
         </div>
 
         <!-- ENGINE V2 STATE CARD -->
+        <style>
+            .ctx-grid {
+                display: grid;
+                grid-template-columns: repeat(6, minmax(0, 1fr));
+                gap: 12px;
+            }
+            @media (max-width: 1100px) { .ctx-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+            @media (max-width: 640px)  { .ctx-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+            .ctx-tile {
+                background: var(--bg-card);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                padding: 14px 14px 12px;
+                position: relative;
+                overflow: hidden;
+                min-height: 96px;
+                display: flex;
+                flex-direction: column;
+                justify-content: space-between;
+            }
+            .ctx-tile::before {
+                content: ""; position: absolute; left: 0; top: 0; bottom: 0;
+                width: 3px; background: var(--accent-dim);
+            }
+            .ctx-tile.ok::before    { background: var(--green); }
+            .ctx-tile.warn::before  { background: var(--amber); }
+            .ctx-tile.bad::before   { background: var(--red); }
+
+            .ctx-label {
+                font-size: 10px; letter-spacing: 1.4px; text-transform: uppercase;
+                color: var(--text-dim); display: flex; align-items: center; gap: 6px;
+            }
+            .ctx-label .ctx-help {
+                width: 14px; height: 14px; border-radius: 50%;
+                background: rgba(255,255,255,0.05); border: 1px solid var(--border);
+                color: var(--text-dim); font-size: 9px; line-height: 12px;
+                display: inline-flex; align-items: center; justify-content: center;
+                cursor: help;
+            }
+            .ctx-value {
+                font-family: 'JetBrains Mono', monospace; font-weight: 700;
+                font-size: 22px; letter-spacing: -0.5px; margin-top: 6px;
+                color: var(--accent);
+            }
+            .ctx-value.green { color: var(--green); }
+            .ctx-value.amber { color: var(--amber); }
+            .ctx-value.red   { color: var(--red); }
+            .ctx-explain {
+                font-size: 10.5px; color: var(--text-dim); line-height: 1.35;
+                margin-top: 6px;
+            }
+
+            .ctx-summary {
+                margin-top: 14px;
+                padding: 10px 14px;
+                border-radius: 10px;
+                background: rgba(59, 130, 246, 0.05);
+                border: 1px solid rgba(59, 130, 246, 0.18);
+                font-size: 12px; color: var(--text);
+            }
+            .ctx-summary.go     { background: rgba(16,185,129,0.06); border-color: rgba(16,185,129,0.25); }
+            .ctx-summary.cau    { background: rgba(245,158,11,0.06); border-color: rgba(245,158,11,0.25); }
+            .ctx-summary.stop   { background: rgba(239,68,68,0.06);  border-color: rgba(239,68,68,0.25); }
+            .ctx-summary b { color: var(--text); }
+        </style>
         <div class="card" style="margin-bottom:24px;">
             <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
                 <div>
                     <div class="card-title">Engine v2 — Market Context</div>
-                    <div style="font-size:10px;color:var(--text-dim);margin-top:2px;">Regime · HTF bias · session · news · volatility</div>
+                    <div style="font-size:10px;color:var(--text-dim);margin-top:2px;">What the trading engine sees right now. Each tile is a gate; all six must look healthy before a signal can pass.</div>
                 </div>
+                <div id="v2-trade-allowed" style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;padding:6px 12px;border-radius:6px;background:rgba(120,120,120,0.1);color:var(--text-dim);">--</div>
             </div>
             <div class="card-body">
-                <div class="stat-grid" style="grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px;">
-                    <div class="stat-card"><div class="stat-label">Regime</div><div class="stat-value accent" id="v2-regime">--</div></div>
-                    <div class="stat-card"><div class="stat-label">HTF Bias</div><div class="stat-value accent" id="v2-htf">--</div></div>
-                    <div class="stat-card"><div class="stat-label">Session</div><div class="stat-value accent" id="v2-session">--</div></div>
-                    <div class="stat-card"><div class="stat-label">News</div><div class="stat-value accent" id="v2-news">--</div></div>
-                    <div class="stat-card"><div class="stat-label">ADX (H1)</div><div class="stat-value accent" id="v2-adx">--</div></div>
-                    <div class="stat-card"><div class="stat-label">ATR Pct</div><div class="stat-value accent" id="v2-atrpct">--</div></div>
+                <div class="ctx-grid" id="v2-ctx-grid">
+                    <div class="ctx-tile" id="ctx-regime">
+                        <div>
+                            <div class="ctx-label">Regime <span class="ctx-help" title="The overall character of the market. Strong-trend = directional with momentum, compression = tight range about to break, exhaustion = stretched and likely to reverse, chop = noise (no trade).">?</span></div>
+                            <div class="ctx-value" id="v2-regime">--</div>
+                        </div>
+                        <div class="ctx-explain" id="v2-regime-exp">Detecting market state…</div>
+                    </div>
+
+                    <div class="ctx-tile" id="ctx-htf">
+                        <div>
+                            <div class="ctx-label">HTF Bias <span class="ctx-help" title="Higher-timeframe direction filter. Built from H4 EMA-50/200 and Daily EMA-20. We only trade WITH this bias, never against.">?</span></div>
+                            <div class="ctx-value" id="v2-htf">--</div>
+                        </div>
+                        <div class="ctx-explain" id="v2-htf-exp">Reading H4 + Daily structure…</div>
+                    </div>
+
+                    <div class="ctx-tile" id="ctx-session">
+                        <div>
+                            <div class="ctx-label">Session <span class="ctx-help" title="Time-of-day quality grade. London/NY overlap = best, late NY = ok, Asia = weak, off-hours/weekend = blocked.">?</span></div>
+                            <div class="ctx-value" id="v2-session">--</div>
+                        </div>
+                        <div class="ctx-explain" id="v2-session-exp">Checking session quality…</div>
+                    </div>
+
+                    <div class="ctx-tile" id="ctx-news">
+                        <div>
+                            <div class="ctx-label">News <span class="ctx-help" title="Economic-calendar blackout. We pause trading 30 min before and 15 min after high-impact USD/EUR/GBP/JPY/CHF releases.">?</span></div>
+                            <div class="ctx-value" id="v2-news">--</div>
+                        </div>
+                        <div class="ctx-explain" id="v2-news-exp">Looking up upcoming events…</div>
+                    </div>
+
+                    <div class="ctx-tile" id="ctx-adx">
+                        <div>
+                            <div class="ctx-label">Trend Strength <span class="ctx-help" title="ADX(14) on H1. Below 20 = no trend, 20–25 = weak, 25–35 = strong, above 35 = very strong.">?</span></div>
+                            <div class="ctx-value" id="v2-adx">--</div>
+                        </div>
+                        <div class="ctx-explain" id="v2-adx-exp">Measuring directional energy…</div>
+                    </div>
+
+                    <div class="ctx-tile" id="ctx-atr">
+                        <div>
+                            <div class="ctx-label">Volatility <span class="ctx-help" title="Where the current ATR sits in its 200-bar history. Sweet spot is 0.30–0.70. Below = dead market, above = chaotic spikes.">?</span></div>
+                            <div class="ctx-value" id="v2-atrpct">--</div>
+                        </div>
+                        <div class="ctx-explain" id="v2-atr-exp">Profiling recent range…</div>
+                    </div>
                 </div>
-                <div style="margin-top:12px;">
-                    <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;">Recent decisions (last 10)</div>
+
+                <div class="ctx-summary" id="v2-ctx-summary">Building market picture…</div>
+
+                <div style="margin-top:14px;">
+                    <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;letter-spacing:1px;text-transform:uppercase;">Recent decisions (last 10)</div>
                     <table class="table" id="v2-decisions" style="font-size:11px;">
                         <thead><tr><th>Time</th><th>Strategy</th><th>Dir</th><th>Score</th><th>Regime</th><th>Status</th><th>Reason</th></tr></thead>
                         <tbody id="v2-decisions-body"></tbody>
@@ -1893,6 +2004,117 @@ refreshDashboard();
 refreshPrice();
 refreshPortfolio();
 
+function _setTile(tileId, valueId, expId, displayValue, state, explanation) {
+    const tile = document.getElementById(tileId);
+    const val = document.getElementById(valueId);
+    const exp = document.getElementById(expId);
+    if (tile) {
+        tile.classList.remove('ok', 'warn', 'bad');
+        if (state) tile.classList.add(state);
+    }
+    if (val) {
+        val.classList.remove('green', 'amber', 'red');
+        if (state === 'ok') val.classList.add('green');
+        else if (state === 'warn') val.classList.add('amber');
+        else if (state === 'bad') val.classList.add('red');
+        val.textContent = displayValue;
+    }
+    if (exp) exp.textContent = explanation;
+}
+
+const V2_REGIME_INFO = {
+    strong_trend: { state: 'ok',   label: 'Strong Trend', exp: 'Directional momentum — trend & momentum strategies enabled.' },
+    compression : { state: 'warn', label: 'Compression',  exp: 'Tight range — waiting for breakout strategy to fire.' },
+    exhaustion  : { state: 'warn', label: 'Exhaustion',   exp: 'Stretched price — only liquidity-sweep reversals allowed.' },
+    chop        : { state: 'bad',  label: 'Chop',         exp: 'No clean structure — all strategies paused.' },
+    unknown     : { state: 'bad',  label: 'Unknown',      exp: 'Not enough data yet to classify.' },
+};
+
+const V2_HTF_INFO = {
+    long_only  : { state: 'ok',   label: 'Long Only',  exp: 'H4 & Daily both bullish. Only BUY setups allowed.' },
+    short_only : { state: 'ok',   label: 'Short Only', exp: 'H4 & Daily both bearish. Only SELL setups allowed.' },
+    lean_long  : { state: 'warn', label: 'Lean Long',  exp: 'Mild bullish skew. SELLs allowed but penalised.' },
+    lean_short : { state: 'warn', label: 'Lean Short', exp: 'Mild bearish skew. BUYs allowed but penalised.' },
+    neutral    : { state: 'bad',  label: 'Neutral',    exp: 'No HTF bias — all signals blocked until clarity.' },
+};
+
+function _sessionInfo(label) {
+    const map = {
+        london_ny_overlap: { state: 'ok',   pretty: 'London/NY Overlap', exp: 'Highest-quality window. Full strategy allowlist active.' },
+        ny_pre_open      : { state: 'ok',   pretty: 'NY Pre-Open',       exp: 'Strong session. Trading enabled.' },
+        london           : { state: 'ok',   pretty: 'London',            exp: 'Healthy liquidity. Trading enabled.' },
+        late_ny          : { state: 'warn', pretty: 'Late NY',           exp: 'Dwindling liquidity — score penalty applied.' },
+        asia             : { state: 'warn', pretty: 'Asia',              exp: 'Low-liquidity session — only the very best setups pass.' },
+        off_hours        : { state: 'bad',  pretty: 'Off Hours',         exp: '20:00–24:00 UTC — gold market thin. Trading paused.' },
+        weekend          : { state: 'bad',  pretty: 'Weekend',           exp: 'Market closed. Trading paused.' },
+        unknown          : { state: 'bad',  pretty: 'Unknown',           exp: 'Could not classify time window.' },
+    };
+    return map[label] || map.unknown;
+}
+
+function _adxInfo(adx) {
+    if (adx === null || adx === undefined || isNaN(adx)) return { state: 'bad', label: '--', exp: 'No reading.' };
+    const v = Number(adx);
+    if (v >= 35) return { state: 'ok',   label: v.toFixed(1), exp: 'Very strong trend.' };
+    if (v >= 25) return { state: 'ok',   label: v.toFixed(1), exp: 'Strong trend — ideal for trend strategies.' };
+    if (v >= 20) return { state: 'warn', label: v.toFixed(1), exp: 'Weak trend — borderline.' };
+    return         { state: 'bad',  label: v.toFixed(1), exp: 'No trend — ranging market.' };
+}
+
+function _atrInfo(pct) {
+    if (pct === null || pct === undefined || isNaN(pct)) return { state: 'bad', label: '--', exp: 'No reading.' };
+    const v = Number(pct);
+    const display = v.toFixed(2);
+    if (v >= 0.30 && v <= 0.70) return { state: 'ok',   label: display, exp: 'Normal volatility — sweet spot.' };
+    if (v < 0.30)               return { state: 'warn', label: display, exp: 'Volatility low — moves may stall.' };
+    if (v > 0.90)               return { state: 'bad',  label: display, exp: 'Volatility extreme — whipsaw risk.' };
+    return                          { state: 'warn', label: display, exp: 'Volatility elevated.' };
+}
+
+function _newsInfo(blocked, nextTitle, nextAt) {
+    if (blocked) return { state: 'bad', label: 'BLOCKED', exp: 'High-impact event in the blackout window — trading paused.' };
+    if (nextTitle && nextAt) {
+        try {
+            const dt = new Date(nextAt);
+            const mins = Math.max(0, Math.round((dt - new Date()) / 60000));
+            if (mins < 60)   return { state: 'warn', label: `${mins}m`,  exp: `Next: ${nextTitle} in ${mins} min.` };
+            if (mins < 12*60) return { state: 'ok',  label: `${Math.round(mins/60)}h`, exp: `Next: ${nextTitle} at ${dt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}.` };
+        } catch (e) { /* fall through */ }
+    }
+    return { state: 'ok', label: 'Clear', exp: 'No upcoming high-impact events. All clear.' };
+}
+
+function _summarize(snap) {
+    const banner = document.getElementById('v2-trade-allowed');
+    const summary = document.getElementById('v2-ctx-summary');
+    if (!snap) return;
+    const blocks = [];
+    if (snap.session === 'off_hours' || snap.session === 'weekend') blocks.push('outside trading hours');
+    if (snap.news_blocked) blocks.push('news blackout');
+    if (snap.regime === 'chop' || snap.regime === 'unknown') blocks.push(`regime=${snap.regime}`);
+    if (snap.htf_bias === 'neutral') blocks.push('HTF unclear');
+
+    if (blocks.length === 0) {
+        banner.textContent = 'Trading';
+        banner.style.background = 'rgba(16,185,129,0.12)';
+        banner.style.color = '#10b981';
+        summary.className = 'ctx-summary go';
+        summary.innerHTML = `<b>Engine ready.</b> Allowed strategies for <b>${snap.regime}</b> regime are scanning every 30 min. Signals must score ≥ 6.5 / 10 to fire.`;
+    } else if (blocks.length === 1 && (snap.session === 'asia' || snap.session === 'late_ny')) {
+        banner.textContent = 'Cautious';
+        banner.style.background = 'rgba(245,158,11,0.12)';
+        banner.style.color = '#f59e0b';
+        summary.className = 'ctx-summary cau';
+        summary.innerHTML = `<b>Cautious mode.</b> Session quality reduced — only top-tier setups will pass. ${blocks.join(', ')}.`;
+    } else {
+        banner.textContent = 'Paused';
+        banner.style.background = 'rgba(239,68,68,0.12)';
+        banner.style.color = '#ef4444';
+        summary.className = 'ctx-summary stop';
+        summary.innerHTML = `<b>Engine paused.</b> No new signals will be generated. Reasons: ${blocks.join(', ')}.`;
+    }
+}
+
 async function refreshEngineV2() {
     try {
         const [regimeResp, decResp] = await Promise.all([
@@ -1901,13 +2123,27 @@ async function refreshEngineV2() {
         ]);
         if (regimeResp.ok) {
             const r = await regimeResp.json();
-            if (r && r.snapshot) {
-                document.getElementById('v2-regime').textContent = r.snapshot.regime || '--';
-                document.getElementById('v2-htf').textContent = r.snapshot.htf_bias || '--';
-                document.getElementById('v2-session').textContent = r.snapshot.session || '--';
-                document.getElementById('v2-news').textContent = r.snapshot.news_blocked ? 'BLOCKED' : 'clear';
-                document.getElementById('v2-adx').textContent = (r.snapshot.adx ?? '--').toString();
-                document.getElementById('v2-atrpct').textContent = (r.snapshot.atr_percentile ?? '--').toString();
+            const snap = r && r.snapshot;
+            if (snap) {
+                const reg = V2_REGIME_INFO[snap.regime] || V2_REGIME_INFO.unknown;
+                _setTile('ctx-regime', 'v2-regime', 'v2-regime-exp', reg.label, reg.state, reg.exp);
+
+                const htf = V2_HTF_INFO[snap.htf_bias] || V2_HTF_INFO.neutral;
+                _setTile('ctx-htf', 'v2-htf', 'v2-htf-exp', htf.label, htf.state, htf.exp);
+
+                const sess = _sessionInfo(snap.session);
+                _setTile('ctx-session', 'v2-session', 'v2-session-exp', sess.pretty, sess.state, sess.exp);
+
+                const news = _newsInfo(snap.news_blocked, r.news_next?.title, r.news_next?.at);
+                _setTile('ctx-news', 'v2-news', 'v2-news-exp', news.label, news.state, news.exp);
+
+                const adxI = _adxInfo(snap.adx);
+                _setTile('ctx-adx', 'v2-adx', 'v2-adx-exp', adxI.label, adxI.state, adxI.exp);
+
+                const atrI = _atrInfo(snap.atr_percentile);
+                _setTile('ctx-atr', 'v2-atrpct', 'v2-atr-exp', atrI.label, atrI.state, atrI.exp);
+
+                _summarize(snap);
             }
         }
         if (decResp.ok) {
