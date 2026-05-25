@@ -118,6 +118,28 @@ class OutcomeDetector:
                     exit_price=exit_price,
                     now=now,
                 )
+                # Pull MAE/MFE from the matching paper trade
+                mae, mfe = await self._enrich_outcome_from_paper_trade(session, signal.id)
+                outcome.mae_pts = mae
+                outcome.mfe_pts = mfe
+                # Pull score/regime/session from the decision log entry
+                score, regime, sess = await self._enrich_outcome_from_decision(session, signal.id)
+                outcome.score_at_entry = score
+                outcome.regime_at_entry = regime
+                outcome.session_at_entry = sess
+                # Compute RR achieved from exit_price relative to entry/sl
+                try:
+                    entry_f = float(signal.entry_price)
+                    sl_f = float(signal.stop_loss)
+                    risk = abs(entry_f - sl_f)
+                    if risk > 0:
+                        if signal.direction == "BUY":
+                            move = exit_price - entry_f
+                        else:
+                            move = entry_f - exit_price
+                        outcome.rr_achieved = Decimal(str(round(move / risk, 3)))
+                except Exception:
+                    pass
                 session.add(outcome)
                 outcomes.append(outcome)
 
@@ -356,6 +378,46 @@ class OutcomeDetector:
     # ------------------------------------------------------------------
     # Outcome recording
     # ------------------------------------------------------------------
+
+    async def _enrich_outcome_from_paper_trade(
+        self, session: AsyncSession, signal_id: int
+    ) -> tuple[Decimal | None, Decimal | None]:
+        """Look up the matching paper trade (if any) for MAE/MFE points."""
+        from app.models.paper_trade import PaperTrade
+        from sqlalchemy import select as _select
+
+        row = (
+            await session.execute(
+                _select(PaperTrade.mae_pts, PaperTrade.mfe_pts).where(
+                    PaperTrade.signal_id == signal_id
+                )
+            )
+        ).first()
+        if row is None:
+            return None, None
+        return row[0], row[1]
+
+    async def _enrich_outcome_from_decision(
+        self, session: AsyncSession, signal_id: int
+    ) -> tuple[Decimal | None, str | None, str | None]:
+        """Pull score/regime/session at entry from the decision log."""
+        from app.models.signal_decision import SignalDecision
+        from sqlalchemy import select as _select
+
+        row = (
+            await session.execute(
+                _select(
+                    SignalDecision.score,
+                    SignalDecision.regime,
+                    SignalDecision.session,
+                ).where(SignalDecision.signal_id == signal_id, SignalDecision.accepted.is_(True))
+                .order_by(SignalDecision.created_at.desc())
+                .limit(1)
+            )
+        ).first()
+        if row is None:
+            return None, None, None
+        return row[0], row[1], row[2]
 
     def _record_outcome(
         self,

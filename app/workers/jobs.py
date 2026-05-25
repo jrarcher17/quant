@@ -884,6 +884,19 @@ async def run_param_optimization() -> None:
             )
 
 
+async def refresh_news_calendar_job() -> None:
+    """Fetch the ForexFactory weekly XML feed and upsert into news_events."""
+    try:
+        from app.services.news_calendar import refresh_news_calendar
+        async with async_session_factory() as session:
+            n = await refresh_news_calendar(session)
+            logger.info("refresh_news_calendar_job: stored {} events", n)
+        FailureTracker.record_success("refresh_news_calendar")
+    except Exception:
+        logger.exception("refresh_news_calendar_job failed")
+        FailureTracker.record_failure("refresh_news_calendar")
+
+
 async def check_paper_trades() -> None:
     """Check open paper trades against live price and close/partial-close as needed.
 
@@ -895,14 +908,15 @@ async def check_paper_trades() -> None:
             check_open_positions,
             expire_stale_paper_trades,
             fetch_live_price,
+            update_mae_mfe,
         )
         from app.services.reversal_service import check_and_reverse_positions
+        from app.risk.trail_engine import TrailEngine
         from sqlalchemy import select
         from app.models.paper_trade import PaperTrade
 
         settings = get_settings()
         async with async_session_factory() as session:
-            # Check if there are any open trades first
             result = await session.execute(
                 select(PaperTrade).where(PaperTrade.status == "open").limit(1)
             )
@@ -916,6 +930,11 @@ async def check_paper_trades() -> None:
                 logger.warning("check_paper_trades: could not fetch live price for {}", symbol)
                 return
 
+            await update_mae_mfe(session, live_price)
+            try:
+                await TrailEngine().update_trails(session, live_price)
+            except Exception:
+                logger.exception("TrailEngine update failed (non-fatal)")
             await check_open_positions(session, live_price)
             await expire_stale_paper_trades(session, live_price)
             await check_and_reverse_positions(session, live_price)

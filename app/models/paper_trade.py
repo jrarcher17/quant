@@ -65,6 +65,10 @@ class PaperTrade(Base):
     # Total realised P&L for the full trade (tp1 partial + final close)
     realized_pnl_usd: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=Decimal("0.00"))
 
+    # Max adverse excursion / max favourable excursion in price points (live-tracked)
+    mae_pts: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    mfe_pts: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

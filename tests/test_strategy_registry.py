@@ -14,22 +14,28 @@ from app.strategies.base import BaseStrategy, CandidateSignal, Direction
 from app.strategies.liquidity_sweep import LiquiditySweepStrategy
 from app.strategies.trend_continuation import TrendContinuationStrategy
 from app.strategies.breakout_expansion import BreakoutExpansionStrategy
+from app.strategies.ema_momentum import EMAMomentumStrategy
 
 
 class TestRegistryContents:
     """Verify all strategies are registered correctly."""
 
-    def test_registry_has_three_strategies(self):
-        """len(BaseStrategy.get_registry()) == 3."""
+    def test_registry_has_four_strategies(self):
+        """len(BaseStrategy.get_registry()) == 4."""
         registry = BaseStrategy.get_registry()
-        assert len(registry) == 3, (
-            f"Expected 3 strategies, got {len(registry)}: {list(registry.keys())}"
+        assert len(registry) == 4, (
+            f"Expected 4 strategies, got {len(registry)}: {list(registry.keys())}"
         )
 
     def test_registry_keys(self):
-        """Keys are exactly {liquidity_sweep, trend_continuation, breakout_expansion}."""
+        """Keys are exactly the four registered v2 strategies."""
         registry = BaseStrategy.get_registry()
-        expected = {"liquidity_sweep", "trend_continuation", "breakout_expansion"}
+        expected = {
+            "liquidity_sweep",
+            "trend_continuation",
+            "breakout_expansion",
+            "ema_momentum",
+        }
         assert set(registry.keys()) == expected, (
             f"Expected keys {expected}, got {set(registry.keys())}"
         )

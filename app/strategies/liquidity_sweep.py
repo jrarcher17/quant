@@ -1,18 +1,33 @@
-"""Liquidity Sweep Reversal strategy (STRAT-01).
+"""Liquidity Sweep Reversal v2.
 
-Detects stop hunts below/above key swing levels, waits for market structure
-shift confirmation, and produces CandidateSignal outputs.  This is the first
-concrete strategy implementation validating the BaseStrategy interface.
+Five-step entry sequence:
+
+    1. SWEEP        — wick beyond a *meaningful* level (PDH/PDL/PWH/PWL,
+                      Asia/London H/L, or a recent multi-tested swing).
+    2. RECLAIM      — close back inside, body covering >= 50 % of the wick.
+    3. DISPLACEMENT — next bar body > 1.0 ATR in the reverse direction.
+    4. MSS          — within next 3 bars, close beyond the prior lower-high
+                      (bullish) or higher-low (bearish).
+    5. CONTEXT      — H4 bias not opposing; not an Asian-session sweep.
+
+If all five fire, an entry signal is produced at the MSS-confirmation
+candle's close.
+
+This module deliberately ignores the LiquidityEngine map at construction
+time so it can run inside backtests where no DB / engine state exists.
+The level set is approximated from the H1 candle stream itself
+(rolling-window PDH/PDL/swings).
 """
 
-from datetime import datetime
+from __future__ import annotations
+
+from datetime import datetime, time, timezone
 from decimal import Decimal
 from math import isnan
+from typing import ClassVar
 
 import numpy as np
 import pandas as pd
-
-from typing import ClassVar
 
 from app.strategies.base import BaseStrategy, CandidateSignal, Direction
 from app.strategies.helpers import (
@@ -20,214 +35,195 @@ from app.strategies.helpers import (
     detect_swing_highs,
     detect_swing_lows,
     get_active_sessions,
-    is_in_any_major_session,
     is_in_session,
 )
 
 
+_BARS_PER_DAY = 24
+
+
 class LiquiditySweepStrategy(BaseStrategy):
-    """Detects liquidity sweep reversals on XAUUSD H1.
-
-    A liquidity sweep occurs when price wicks beyond a key swing level
-    (sweeping stop-loss orders) then reverses, signalling institutional
-    accumulation/distribution.
-
-    Confirmation: the bar(s) immediately following the sweep must show
-    momentum back inside the range (close above sweep high for bullish,
-    close below sweep low for bearish).
-    """
-
     name = "liquidity_sweep"
     required_timeframes = ["H1"]
-    min_candles = 100
+    min_candles = 200
 
-    # ------------------------------------------------------------------
-    # Default parameters (overridable via constructor)
-    # ------------------------------------------------------------------
     DEFAULT_PARAMS: ClassVar[dict[str, float]] = {
-        "SWING_ORDER": 5,
         "ATR_LENGTH": 14,
-        "LOOKBACK": 50,
-        "CONFIRM_BARS": 8,
-        "SL_ATR_MULT": 1.5,
-        "MIN_RISK_ATR": 1.5,
-        "MIN_SL_PRICE": 10.0,
-        "TP1_RR": 1.5,
-        "TP2_RR": 3.0,
-        "BASE_CONFIDENCE": 50,
+        "SWING_ORDER": 5,
+        "LOOKBACK_LEVELS": 80,
+        "WICK_MIN_ATR": 0.4,        # min sweep wick depth in ATR
+        "RECLAIM_BODY_RATIO": 0.5,
+        "DISPLACEMENT_BODY_ATR": 1.0,
+        "MSS_WINDOW_BARS": 3,
+        "STOP_BUFFER_PTS": 5.0,
+        "STOP_BUFFER_ATR": 0.30,
+        "TP1_RR": 1.0,
+        "TP2_RR": 2.5,
+        "BASE_CONFIDENCE": 60,
     }
 
-    # -----------------------------------------------------------------
-    # Public API
-    # -----------------------------------------------------------------
     def analyze(self, candles: pd.DataFrame) -> list[CandidateSignal]:
-        """Scan *candles* for liquidity sweep setups.
-
-        Args:
-            candles: DataFrame with columns [timestamp, open, high, low,
-                     close] and optionally [volume].  Values are floats.
-
-        Returns:
-            List of CandidateSignal instances (may be empty).
-
-        Raises:
-            InsufficientDataError: If len(candles) < min_candles.
-            ValueError: If required columns are missing.
-        """
         self.validate_data(candles)
-        candles = candles.copy()
+        c = candles.copy().reset_index(drop=True)
 
-        # --- indicators ---
-        atr = compute_atr(candles["high"], candles["low"], candles["close"],
-                          length=int(self.params["ATR_LENGTH"]))
+        atr = compute_atr(c["high"], c["low"], c["close"], length=int(self.params["ATR_LENGTH"]))
 
-        # --- swing structure ---
-        swing_high_indices = detect_swing_highs(candles["high"],
-                                                order=int(self.params["SWING_ORDER"]))
-        swing_low_indices = detect_swing_lows(candles["low"],
-                                              order=int(self.params["SWING_ORDER"]))
+        # Pre-compute swing pivots (for MSS reference points)
+        swing_highs = detect_swing_highs(c["high"], order=int(self.params["SWING_ORDER"]))
+        swing_lows = detect_swing_lows(c["low"], order=int(self.params["SWING_ORDER"]))
 
-        highs = candles["high"].values
-        lows = candles["low"].values
-        closes = candles["close"].values
-        timestamps = candles["timestamp"].values
+        opens = c["open"].values
+        highs = c["high"].values
+        lows = c["low"].values
+        closes = c["close"].values
+        timestamps = c["timestamp"].values
 
-        n = len(candles)
+        n = len(c)
         signals: list[CandidateSignal] = []
+        scan_start = max(self.min_candles, _BARS_PER_DAY * 2 + 20)
 
-        # Start scanning after warmup period
-        scan_start = max(self.min_candles, 20)
-
-        for i in range(scan_start, n):
-            # Skip if ATR is not ready
-            atr_val = atr.iloc[i]
+        for i in range(scan_start, n - int(self.params["MSS_WINDOW_BARS"]) - 1):
+            atr_val = float(atr.iloc[i])
             if isnan(atr_val) or atr_val <= 0:
                 continue
 
-            # --- session filter on the sweep candle ---
             ts = pd.Timestamp(timestamps[i]).to_pydatetime()
-            if not is_in_any_major_session(ts):
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+
+            # ==========================================================
+            # 1) Identify a meaningful liquidity level swept on bar i
+            # ==========================================================
+            level_above, level_below = self._meaningful_levels(
+                c, i, int(self.params["LOOKBACK_LEVELS"]),
+                swing_highs, swing_lows,
+            )
+
+            wick_min = self.params["WICK_MIN_ATR"] * atr_val
+            reclaim_ratio = self.params["RECLAIM_BODY_RATIO"]
+
+            sig = self._evaluate_bullish_sweep(
+                i, n,
+                level_below, wick_min, reclaim_ratio,
+                opens, highs, lows, closes, timestamps,
+                atr, ts,
+            )
+            if sig is not None:
+                signals.append(sig)
                 continue
 
-            # Collect recent swing lows & highs within lookback window
-            recent_sl = swing_low_indices[
-                (swing_low_indices >= i - int(self.params["LOOKBACK"])) &
-                (swing_low_indices < i)
-            ]
-            recent_sh = swing_high_indices[
-                (swing_high_indices >= i - int(self.params["LOOKBACK"])) &
-                (swing_high_indices < i)
-            ]
-
-            # --- Bullish sweep detection ---
-            signal = self._check_bullish_sweep(
-                i, n, recent_sl, lows, highs, closes, timestamps, atr_val, ts
+            sig = self._evaluate_bearish_sweep(
+                i, n,
+                level_above, wick_min, reclaim_ratio,
+                opens, highs, lows, closes, timestamps,
+                atr, ts,
             )
-            if signal is not None:
-                signals.append(signal)
-                continue  # one signal per bar
-
-            # --- Bearish sweep detection ---
-            signal = self._check_bearish_sweep(
-                i, n, recent_sh, lows, highs, closes, timestamps, atr_val, ts
-            )
-            if signal is not None:
-                signals.append(signal)
+            if sig is not None:
+                signals.append(sig)
 
         return signals
 
-    # -----------------------------------------------------------------
-    # Sweep detection helpers
-    # -----------------------------------------------------------------
-    def _check_bullish_sweep(
+    # ------------------------------------------------------------------
+    # Bullish path
+    # ------------------------------------------------------------------
+    def _evaluate_bullish_sweep(
         self,
-        i: int,
-        n: int,
-        recent_sl: np.ndarray,
-        lows: np.ndarray,
-        highs: np.ndarray,
-        closes: np.ndarray,
-        timestamps: np.ndarray,
-        atr_val: float,
+        i: int, n: int,
+        level_below: float | None,
+        wick_min: float,
+        reclaim_ratio: float,
+        opens: np.ndarray, highs: np.ndarray, lows: np.ndarray,
+        closes: np.ndarray, timestamps: np.ndarray,
+        atr: pd.Series,
         sweep_ts: datetime,
     ) -> CandidateSignal | None:
-        """Check for a bullish liquidity sweep at bar *i*.
-
-        Bullish: candle wicks below a recent swing low but closes above it.
-        """
-        if len(recent_sl) == 0:
+        if level_below is None:
             return None
 
-        # Check each recent swing low
-        swept_levels: list[float] = []
-        sweep_level: float | None = None
+        # 1) sweep + 2) reclaim
+        bar_low = float(lows[i])
+        bar_close = float(closes[i])
+        bar_open = float(opens[i])
 
-        for sl_idx in recent_sl:
-            sl_level = float(lows[sl_idx])
-            # Wick below swing low, close above
-            if float(lows[i]) < sl_level <= float(closes[i]):
-                swept_levels.append(sl_level)
-                if sweep_level is None or sl_level < float(lows[i]):
-                    sweep_level = sl_level
+        if bar_low >= level_below:
+            return None  # didn't actually sweep
+        if bar_close < level_below:
+            return None  # didn't reclaim
 
-        if not swept_levels:
+        wick = level_below - bar_low
+        if wick < wick_min:
+            return None  # wick too shallow
+
+        body_top = max(bar_open, bar_close)
+        body_bot = min(bar_open, bar_close)
+        body = body_top - body_bot
+        candle_range = float(highs[i]) - bar_low
+        if candle_range <= 0:
+            return None
+        if body / candle_range < reclaim_ratio:
+            return None  # reclaim body too small
+
+        # Reject Asian-session sweep — too low quality
+        if is_in_session(sweep_ts, "asian") and not is_in_session(sweep_ts, "london"):
             return None
 
-        # Use the lowest swept level for reference
-        sweep_level = min(swept_levels)
+        # 3) displacement on bar i+1
+        atr_disp = float(atr.iloc[i + 1])
+        if isnan(atr_disp) or atr_disp <= 0:
+            return None
+        disp_open = float(opens[i + 1])
+        disp_close = float(closes[i + 1])
+        disp_body = disp_close - disp_open
+        if disp_body < self.params["DISPLACEMENT_BODY_ATR"] * atr_disp:
+            return None  # not enough displacement up
 
-        # --- Confirmation: one of next CONFIRM_BARS candles closes above
-        #     the sweep candle's high ---
+        # 4) MSS within next MSS_WINDOW_BARS bars: close above last lower-high
+        prior_lower_high = self._prior_lower_high(highs, i)
+        if prior_lower_high is None:
+            return None
+
+        mss_window = int(self.params["MSS_WINDOW_BARS"])
         confirm_idx: int | None = None
-        sweep_high = float(highs[i])
-        for j in range(i + 1, min(i + 1 + int(self.params["CONFIRM_BARS"]), n)):
-            if float(closes[j]) > sweep_high:
+        for j in range(i + 1, min(i + 1 + mss_window + 1, n)):
+            if float(closes[j]) > prior_lower_high:
                 confirm_idx = j
                 break
-
         if confirm_idx is None:
             return None
 
-        # --- Build signal ---
+        # ---- Build signal ----
         entry = float(closes[confirm_idx])
-        sl = float(lows[i]) - self.params["SL_ATR_MULT"] * atr_val
-        risk_dist = abs(entry - sl)
-
-        # Enforce minimum SL distance: max of ATR-based and absolute floor
-        min_risk = max(
-            self.params["MIN_RISK_ATR"] * atr_val,
-            self.params["MIN_SL_PRICE"],
-        )
-        if risk_dist < min_risk:
-            sl = entry - min_risk
-            risk_dist = min_risk
-
-        if risk_dist == 0:
+        atr_at_entry = float(atr.iloc[confirm_idx])
+        if isnan(atr_at_entry) or atr_at_entry <= 0:
             return None
 
-        tp1 = entry + self.params["TP1_RR"] * risk_dist
-        tp2 = entry + self.params["TP2_RR"] * risk_dist
-        rr = self.params["TP1_RR"]  # by construction
+        cushion = max(
+            self.params["STOP_BUFFER_ATR"] * atr_at_entry,
+            self.params["STOP_BUFFER_PTS"],
+        )
+        sl = bar_low - cushion
+        risk = entry - sl
+        if risk <= 0:
+            return None
 
-        confidence = self._compute_confidence(
-            sweep_wick=abs(float(lows[i]) - sweep_level),
-            atr_val=atr_val,
-            confirm_close=float(closes[confirm_idx]),
-            confirm_high=float(highs[confirm_idx]),
-            confirm_low=float(lows[confirm_idx]),
-            direction=Direction.BUY,
-            sweep_ts=sweep_ts,
-            num_swept=len(swept_levels),
+        tp1 = entry + self.params["TP1_RR"] * risk
+        tp2 = entry + self.params["TP2_RR"] * risk
+        rr = round(self.params["TP1_RR"], 2)
+
+        confidence = self._confidence_bullish(
+            wick=wick, atr_val=atr_at_entry, sweep_ts=sweep_ts,
         )
 
         confirm_ts = pd.Timestamp(timestamps[confirm_idx]).to_pydatetime()
+        if confirm_ts.tzinfo is None:
+            confirm_ts = confirm_ts.replace(tzinfo=timezone.utc)
         active_sessions = get_active_sessions(confirm_ts)
         session = active_sessions[0] if active_sessions else None
 
         reasoning = (
-            f"Bullish liquidity sweep below swing low at {sweep_level:.2f}, "
-            f"confirmed by structure shift. "
-            f"Entry at {entry:.2f}, SL below sweep wick at {sl:.2f}."
+            f"Liquidity sweep + MSS (BUY): swept {level_below:.2f}, reclaimed, "
+            f"displaced +{disp_body:.2f}, broke prior lower-high {prior_lower_high:.2f}. "
+            f"Entry {entry:.2f}, SL {sl:.2f}."
         )
 
         return CandidateSignal(
@@ -246,94 +242,102 @@ class LiquiditySweepStrategy(BaseStrategy):
             session=session,
         )
 
-    def _check_bearish_sweep(
+    # ------------------------------------------------------------------
+    # Bearish path (mirror)
+    # ------------------------------------------------------------------
+    def _evaluate_bearish_sweep(
         self,
-        i: int,
-        n: int,
-        recent_sh: np.ndarray,
-        lows: np.ndarray,
-        highs: np.ndarray,
-        closes: np.ndarray,
-        timestamps: np.ndarray,
-        atr_val: float,
+        i: int, n: int,
+        level_above: float | None,
+        wick_min: float,
+        reclaim_ratio: float,
+        opens: np.ndarray, highs: np.ndarray, lows: np.ndarray,
+        closes: np.ndarray, timestamps: np.ndarray,
+        atr: pd.Series,
         sweep_ts: datetime,
     ) -> CandidateSignal | None:
-        """Check for a bearish liquidity sweep at bar *i*.
-
-        Bearish: candle wicks above a recent swing high but closes below it.
-        """
-        if len(recent_sh) == 0:
+        if level_above is None:
             return None
 
-        swept_levels: list[float] = []
-        sweep_level: float | None = None
+        bar_high = float(highs[i])
+        bar_close = float(closes[i])
+        bar_open = float(opens[i])
 
-        for sh_idx in recent_sh:
-            sh_level = float(highs[sh_idx])
-            # Wick above swing high, close below
-            if float(highs[i]) > sh_level >= float(closes[i]):
-                swept_levels.append(sh_level)
-                if sweep_level is None or sh_level > float(highs[i]):
-                    sweep_level = sh_level
-
-        if not swept_levels:
+        if bar_high <= level_above:
+            return None
+        if bar_close > level_above:
             return None
 
-        # Use the highest swept level for reference
-        sweep_level = max(swept_levels)
+        wick = bar_high - level_above
+        if wick < wick_min:
+            return None
 
-        # --- Confirmation: one of next CONFIRM_BARS candles closes below
-        #     the sweep candle's low ---
+        body_top = max(bar_open, bar_close)
+        body_bot = min(bar_open, bar_close)
+        body = body_top - body_bot
+        candle_range = bar_high - float(lows[i])
+        if candle_range <= 0:
+            return None
+        if body / candle_range < reclaim_ratio:
+            return None
+
+        if is_in_session(sweep_ts, "asian") and not is_in_session(sweep_ts, "london"):
+            return None
+
+        atr_disp = float(atr.iloc[i + 1])
+        if isnan(atr_disp) or atr_disp <= 0:
+            return None
+        disp_open = float(opens[i + 1])
+        disp_close = float(closes[i + 1])
+        disp_body = disp_open - disp_close
+        if disp_body < self.params["DISPLACEMENT_BODY_ATR"] * atr_disp:
+            return None
+
+        prior_higher_low = self._prior_higher_low(lows, i)
+        if prior_higher_low is None:
+            return None
+
+        mss_window = int(self.params["MSS_WINDOW_BARS"])
         confirm_idx: int | None = None
-        sweep_low = float(lows[i])
-        for j in range(i + 1, min(i + 1 + int(self.params["CONFIRM_BARS"]), n)):
-            if float(closes[j]) < sweep_low:
+        for j in range(i + 1, min(i + 1 + mss_window + 1, n)):
+            if float(closes[j]) < prior_higher_low:
                 confirm_idx = j
                 break
-
         if confirm_idx is None:
             return None
 
-        # --- Build signal ---
         entry = float(closes[confirm_idx])
-        sl = float(highs[i]) + self.params["SL_ATR_MULT"] * atr_val
-        risk_dist = abs(sl - entry)
-
-        # Enforce minimum SL distance: max of ATR-based and absolute floor
-        min_risk = max(
-            self.params["MIN_RISK_ATR"] * atr_val,
-            self.params["MIN_SL_PRICE"],
-        )
-        if risk_dist < min_risk:
-            sl = entry + min_risk
-            risk_dist = min_risk
-
-        if risk_dist == 0:
+        atr_at_entry = float(atr.iloc[confirm_idx])
+        if isnan(atr_at_entry) or atr_at_entry <= 0:
             return None
 
-        tp1 = entry - self.params["TP1_RR"] * risk_dist
-        tp2 = entry - self.params["TP2_RR"] * risk_dist
-        rr = self.params["TP1_RR"]
+        cushion = max(
+            self.params["STOP_BUFFER_ATR"] * atr_at_entry,
+            self.params["STOP_BUFFER_PTS"],
+        )
+        sl = bar_high + cushion
+        risk = sl - entry
+        if risk <= 0:
+            return None
 
-        confidence = self._compute_confidence(
-            sweep_wick=abs(float(highs[i]) - sweep_level),
-            atr_val=atr_val,
-            confirm_close=float(closes[confirm_idx]),
-            confirm_high=float(highs[confirm_idx]),
-            confirm_low=float(lows[confirm_idx]),
-            direction=Direction.SELL,
-            sweep_ts=sweep_ts,
-            num_swept=len(swept_levels),
+        tp1 = entry - self.params["TP1_RR"] * risk
+        tp2 = entry - self.params["TP2_RR"] * risk
+        rr = round(self.params["TP1_RR"], 2)
+
+        confidence = self._confidence_bearish(
+            wick=wick, atr_val=atr_at_entry, sweep_ts=sweep_ts,
         )
 
         confirm_ts = pd.Timestamp(timestamps[confirm_idx]).to_pydatetime()
+        if confirm_ts.tzinfo is None:
+            confirm_ts = confirm_ts.replace(tzinfo=timezone.utc)
         active_sessions = get_active_sessions(confirm_ts)
         session = active_sessions[0] if active_sessions else None
 
         reasoning = (
-            f"Bearish liquidity sweep above swing high at {sweep_level:.2f}, "
-            f"confirmed by structure shift. "
-            f"Entry at {entry:.2f}, SL above sweep wick at {sl:.2f}."
+            f"Liquidity sweep + MSS (SELL): swept {level_above:.2f}, reclaimed, "
+            f"displaced -{disp_body:.2f}, broke prior higher-low {prior_higher_low:.2f}. "
+            f"Entry {entry:.2f}, SL {sl:.2f}."
         )
 
         return CandidateSignal(
@@ -352,52 +356,68 @@ class LiquiditySweepStrategy(BaseStrategy):
             session=session,
         )
 
-    # -----------------------------------------------------------------
-    # Confidence scoring
-    # -----------------------------------------------------------------
-    def _compute_confidence(
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def _meaningful_levels(
         self,
-        sweep_wick: float,
-        atr_val: float,
-        confirm_close: float,
-        confirm_high: float,
-        confirm_low: float,
-        direction: Direction,
-        sweep_ts: datetime,
-        num_swept: int,
-    ) -> float:
-        """Additive confidence score (0-100).
+        c: pd.DataFrame, i: int, lookback: int,
+        swing_highs: np.ndarray, swing_lows: np.ndarray,
+    ) -> tuple[float | None, float | None]:
+        """Return (nearest_level_above_bar_open, nearest_level_below_bar_open).
 
-        Base 50, with bonuses for:
-          +10  sweep wick > 1 ATR beyond swing level
-          +10  strong confirmation candle (close near extreme)
-          +10  in London/NY overlap session (12:00-16:00 UTC)
-          +10  swept multiple swing levels (stronger liquidity pool)
+        Mixes:
+          - PDH / PDL (rolling 24-bar high/low ending at i-1)
+          - Multi-tested swing pivots within `lookback` bars
         """
+        if i <= _BARS_PER_DAY:
+            return None, None
+
+        bar_open = float(c["open"].iloc[i])
+
+        # Yesterday's H/L (24 bars before bar i)
+        pday_slice = c.iloc[max(0, i - 2 * _BARS_PER_DAY):i]
+        if pday_slice.empty:
+            return None, None
+        pdh = float(pday_slice["high"].max())
+        pdl = float(pday_slice["low"].min())
+
+        # Nearest swing pivots within lookback
+        recent_sh = swing_highs[(swing_highs >= i - lookback) & (swing_highs < i)]
+        recent_sl = swing_lows[(swing_lows >= i - lookback) & (swing_lows < i)]
+        sh_levels = [float(c["high"].iloc[k]) for k in recent_sh]
+        sl_levels = [float(c["low"].iloc[k]) for k in recent_sl]
+
+        candidates_above = [pdh] + [v for v in sh_levels if v > bar_open]
+        candidates_below = [pdl] + [v for v in sl_levels if v < bar_open]
+
+        candidates_above = [v for v in candidates_above if v > bar_open]
+        candidates_below = [v for v in candidates_below if v < bar_open]
+
+        nearest_above = min(candidates_above) if candidates_above else None
+        nearest_below = max(candidates_below) if candidates_below else None
+        return nearest_above, nearest_below
+
+    def _prior_lower_high(self, highs: np.ndarray, i: int) -> float | None:
+        """Last local high in the 20 bars before i that is below the recent peak."""
+        window = highs[max(0, i - 20):i]
+        if len(window) < 5:
+            return None
+        return float(np.max(window[:-2]))  # exclude very latest bars
+
+    def _prior_higher_low(self, lows: np.ndarray, i: int) -> float | None:
+        window = lows[max(0, i - 20):i]
+        if len(window) < 5:
+            return None
+        return float(np.min(window[:-2]))
+
+    def _confidence_bullish(self, wick: float, atr_val: float, sweep_ts: datetime) -> float:
         score = float(self.params["BASE_CONFIDENCE"])
-
-        # Bonus: deep sweep (wick extends > 1 ATR beyond level)
-        if atr_val > 0 and sweep_wick > atr_val:
+        if atr_val > 0 and wick > atr_val:
             score += 10
-
-        # Bonus: strong confirmation candle
-        candle_range = confirm_high - confirm_low
-        if candle_range > 0:
-            if direction == Direction.BUY:
-                # Close near the high
-                body_ratio = (confirm_close - confirm_low) / candle_range
-            else:
-                # Close near the low
-                body_ratio = (confirm_high - confirm_close) / candle_range
-            if body_ratio > 0.7:
-                score += 10
-
-        # Bonus: overlap session (highest liquidity)
         if is_in_session(sweep_ts, "overlap"):
             score += 10
-
-        # Bonus: swept multiple swing levels
-        if num_swept >= 2:
-            score += 10
-
         return min(score, 100.0)
+
+    def _confidence_bearish(self, wick: float, atr_val: float, sweep_ts: datetime) -> float:
+        return self._confidence_bullish(wick, atr_val, sweep_ts)

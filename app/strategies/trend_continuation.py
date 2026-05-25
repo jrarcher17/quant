@@ -1,548 +1,296 @@
-"""Trend Continuation strategy (STRAT-02).
+"""Trend Continuation v2.
 
-Detects EMA-trend pullbacks on XAUUSD H1: identifies when price pulls back
-to the EMA-50 zone during a confirmed trend (EMA-50 vs EMA-200) and then
-shows momentum resumption, producing CandidateSignal outputs.
+Pullback-to-EMA-50 reentry, with substantially stricter filters:
+
+    * ADX gate (>= 22, rising 3 bars)
+    * EMA-50/200 spread expanding vs 5 bars ago (trend strengthening)
+    * Rejection candle at the EMA-50 zone (pin / engulfing pattern)
+    * Volume on confirmation candle >= 1.2 * 20-bar avg (when volume present)
+    * Stop-entry at confirmation_high + 0.1 ATR (or _low - 0.1 ATR)
+    * Exhaustion guard: ATR not declining 3 bars; RSI 22 < x < 78
+    * H4 alignment is checked downstream by the pipeline (HTFBiasEngine)
 """
 
-from datetime import datetime
+from __future__ import annotations
+
+from datetime import datetime, timezone
 from decimal import Decimal
 from math import isnan
+from typing import ClassVar
 
 import numpy as np
 import pandas as pd
-
-from typing import ClassVar
 
 from app.strategies.base import BaseStrategy, CandidateSignal, Direction
 from app.strategies.helpers import (
     compute_atr,
     compute_ema,
-    compute_vwap,
     detect_swing_highs,
     detect_swing_lows,
     get_active_sessions,
     is_in_any_major_session,
-    is_in_session,
 )
+from app.strategies.helpers.indicators import compute_adx, compute_rsi
 
 
 class TrendContinuationStrategy(BaseStrategy):
-    """Detects EMA-trend pullback continuations on XAUUSD H1.
-
-    A trend continuation setup occurs when:
-    1. A clear trend is established (EMA-50 above/below EMA-200)
-    2. Price pulls back to the EMA-50 zone
-    3. A momentum confirmation candle closes back in the trend direction
-
-    Confirmation: candle closes back in trend direction after pulling
-    back to the EMA-50 zone, with close > previous high (bullish) or
-    close < previous low (bearish).
-    """
-
     name = "trend_continuation"
     required_timeframes = ["H1"]
-    min_candles = 200
+    min_candles = 220
 
-    # ------------------------------------------------------------------
-    # Default parameters (overridable via constructor)
-    # ------------------------------------------------------------------
     DEFAULT_PARAMS: ClassVar[dict[str, float]] = {
         "EMA_FAST": 50,
         "EMA_SLOW": 200,
         "ATR_LENGTH": 14,
         "PULLBACK_ATR_MULT": 1.5,
-        "SL_ATR_MULT": 1.5,
-        "MIN_SL_PRICE": 10.0,
-        "TP1_RR": 2.0,
-        "TP2_RR": 3.0,
-        "LOOKBACK_PULLBACK": 8,
-        "BASE_CONFIDENCE": 50,
-        "SWING_ORDER": 5,
+        "MIN_RISK_ATR": 1.5,
+        "MIN_SL_PRICE": 8.0,
+        "STOP_BUFFER_PTS": 5.0,
+        "TP1_RR": 1.0,
+        "TP2_RR": 2.5,
+        "ADX_MIN": 22.0,
+        "ADX_RISING_BARS": 3,
+        "RSI_MAX": 78.0,
+        "RSI_MIN": 22.0,
+        "VOLUME_MULT": 1.2,
+        "STOP_ENTRY_BUFFER_ATR": 0.10,
+        "BASE_CONFIDENCE": 60,
     }
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
     def analyze(self, candles: pd.DataFrame) -> list[CandidateSignal]:
-        """Scan *candles* for trend continuation pullback setups.
-
-        Args:
-            candles: DataFrame with columns [timestamp, open, high, low,
-                     close] and optionally [volume].  Values are floats.
-
-        Returns:
-            List of CandidateSignal instances (may be empty).
-
-        Raises:
-            InsufficientDataError: If len(candles) < min_candles.
-            ValueError: If required columns are missing.
-        """
         self.validate_data(candles)
-        candles = candles.copy()
+        c = candles.copy().reset_index(drop=True)
 
-        # --- indicators ---
-        ema_50 = compute_ema(candles["close"], int(self.params["EMA_FAST"]))
-        ema_200 = compute_ema(candles["close"], int(self.params["EMA_SLOW"]))
-        atr = compute_atr(
-            candles["high"], candles["low"], candles["close"],
-            length=int(self.params["ATR_LENGTH"]),
+        ema_50 = compute_ema(c["close"], int(self.params["EMA_FAST"]))
+        ema_200 = compute_ema(c["close"], int(self.params["EMA_SLOW"]))
+        atr = compute_atr(c["high"], c["low"], c["close"], length=int(self.params["ATR_LENGTH"]))
+        adx = compute_adx(c["high"], c["low"], c["close"], length=14)
+        rsi = compute_rsi(c["close"], length=14)
+
+        opens = c["open"].values
+        highs = c["high"].values
+        lows = c["low"].values
+        closes = c["close"].values
+        timestamps = c["timestamp"].values
+
+        has_volume = (
+            "volume" in c.columns and not c["volume"].fillna(0).eq(0).all()
         )
+        volumes = c["volume"].values if has_volume else None
 
-        # VWAP (optional -- may be all NaN if no volume)
-        vwap = compute_vwap(candles)
-        has_vwap = not vwap.isna().all()
+        n = len(c)
+        out: list[CandidateSignal] = []
 
-        # Swing detection for TP2 targets
-        swing_high_indices = detect_swing_highs(
-            candles["high"], order=int(self.params["SWING_ORDER"]),
-        )
-        swing_low_indices = detect_swing_lows(
-            candles["low"], order=int(self.params["SWING_ORDER"]),
-        )
-
-        opens = candles["open"].values
-        highs = candles["high"].values
-        lows = candles["low"].values
-        closes = candles["close"].values
-        timestamps = candles["timestamp"].values
-
-        n = len(candles)
-        signals: list[CandidateSignal] = []
-
-        for i in range(self.min_candles, n):
+        for i in range(self.min_candles, n - 1):
             atr_val = float(atr.iloc[i])
             if isnan(atr_val) or atr_val <= 0:
                 continue
 
-            ema50_val = float(ema_50.iloc[i])
-            ema200_val = float(ema_200.iloc[i])
-
-            if isnan(ema50_val) or isnan(ema200_val):
+            e50 = float(ema_50.iloc[i])
+            e200 = float(ema_200.iloc[i])
+            if isnan(e50) or isnan(e200):
                 continue
 
-            # --- session filter: any major session (Asian/London/NY) ---
             ts = pd.Timestamp(timestamps[i]).to_pydatetime()
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
             if not is_in_any_major_session(ts):
                 continue
 
-            # --- trend direction ---
-            ema_spread = abs(ema50_val - ema200_val)
-            if ema_spread < 0.3 * atr_val:
-                continue  # no clear trend
+            # Trend filter: clear EMA separation
+            spread_now = abs(e50 - e200)
+            if spread_now < 0.4 * atr_val:
+                continue
 
-            bullish_trend = ema50_val > ema200_val
-            bearish_trend = ema50_val < ema200_val
+            bullish = e50 > e200
+            bearish = e50 < e200
+            if not (bullish or bearish):
+                continue
 
-            close_val = float(closes[i])
-            open_val = float(opens[i])
-            high_val = float(highs[i])
-            low_val = float(lows[i])
+            # Spread expansion: now > 5 bars ago
+            e50_prev = float(ema_50.iloc[i - 5])
+            e200_prev = float(ema_200.iloc[i - 5])
+            spread_prev = abs(e50_prev - e200_prev)
+            if spread_now <= spread_prev:
+                continue
 
-            if bullish_trend:
-                signal = self._check_bullish_continuation(
-                    i, n, ema50_val, atr_val, ema200_val,
-                    opens, highs, lows, closes, timestamps,
-                    vwap, has_vwap, swing_high_indices,
-                    ts,
+            # ADX gate
+            adx_now = float(adx.iloc[i])
+            if isnan(adx_now) or adx_now < self.params["ADX_MIN"]:
+                continue
+            if not self._adx_rising(adx, i, int(self.params["ADX_RISING_BARS"])):
+                continue
+
+            # Exhaustion guard: ATR not declining over last 3 bars
+            atr_recent = atr.iloc[max(0, i - 3): i + 1].dropna().to_list()
+            if len(atr_recent) >= 4 and atr_recent[-1] < atr_recent[0] * 0.9:
+                continue
+
+            rsi_now = float(rsi.iloc[i]) if not isnan(rsi.iloc[i]) else 50.0
+            if rsi_now > self.params["RSI_MAX"] or rsi_now < self.params["RSI_MIN"]:
+                continue
+
+            # Pullback into the EMA50 zone
+            pb_dist = self.params["PULLBACK_ATR_MULT"] * atr_val
+            close_i = float(closes[i])
+
+            if bullish:
+                if not (e50 - pb_dist <= close_i <= e50 + pb_dist):
+                    continue
+                rejection = self._is_bullish_rejection_candle(opens, highs, lows, closes, i)
+                if not rejection:
+                    continue
+                sig = self._build_signal(
+                    direction=Direction.BUY,
+                    confirm_i=i,
+                    e50=e50, e200=e200,
+                    atr_val=atr_val,
+                    opens=opens, highs=highs, lows=lows, closes=closes,
+                    timestamps=timestamps,
+                    volumes=volumes, has_volume=has_volume,
                 )
-                if signal is not None:
-                    signals.append(signal)
-
-            elif bearish_trend:
-                signal = self._check_bearish_continuation(
-                    i, n, ema50_val, atr_val, ema200_val,
-                    opens, highs, lows, closes, timestamps,
-                    vwap, has_vwap, swing_low_indices,
-                    ts,
+            else:
+                if not (e50 - pb_dist <= close_i <= e50 + pb_dist):
+                    continue
+                rejection = self._is_bearish_rejection_candle(opens, highs, lows, closes, i)
+                if not rejection:
+                    continue
+                sig = self._build_signal(
+                    direction=Direction.SELL,
+                    confirm_i=i,
+                    e50=e50, e200=e200,
+                    atr_val=atr_val,
+                    opens=opens, highs=highs, lows=lows, closes=closes,
+                    timestamps=timestamps,
+                    volumes=volumes, has_volume=has_volume,
                 )
-                if signal is not None:
-                    signals.append(signal)
 
-        return signals
+            if sig is not None:
+                out.append(sig)
 
-    # ------------------------------------------------------------------
-    # Bullish continuation
-    # ------------------------------------------------------------------
-    def _check_bullish_continuation(
-        self,
-        i: int,
-        n: int,
-        ema50_val: float,
-        atr_val: float,
-        ema200_val: float,
-        opens: np.ndarray,
-        highs: np.ndarray,
-        lows: np.ndarray,
-        closes: np.ndarray,
-        timestamps: np.ndarray,
-        vwap: pd.Series,
-        has_vwap: bool,
-        swing_high_indices: np.ndarray,
-        ts: datetime,
-    ) -> CandidateSignal | None:
-        """Check for a bullish trend continuation at bar *i*."""
-        close_val = float(closes[i])
-        open_val = float(opens[i])
-        high_val = float(highs[i])
-        low_val = float(lows[i])
-
-        # --- pullback detection ---
-        # Price was above EMA-50 in recent bars
-        pb_mult = self.params["PULLBACK_ATR_MULT"]
-        was_above = False
-        lookback_start = max(0, i - int(self.params["LOOKBACK_PULLBACK"]))
-        for j in range(lookback_start, i):
-            if float(closes[j]) > ema50_val + pb_mult * atr_val:
-                was_above = True
-                break
-
-        if not was_above:
-            return None
-
-        # Current bar is in the pullback zone (within PULLBACK_ATR_MULT * ATR of EMA-50)
-        if not (ema50_val - pb_mult * atr_val <= close_val <= ema50_val + pb_mult * atr_val):
-            return None
-
-        # --- momentum confirmation ---
-        # We need the next bar to confirm momentum resumption
-        if i + 1 >= n:
-            return None
-
-        confirm_close = float(closes[i + 1])
-        confirm_open = float(opens[i + 1])
-        confirm_high = float(highs[i + 1])
-        prev_high = high_val
-
-        # Bullish: close > open (green candle) AND close > previous candle high
-        if not (confirm_close > confirm_open and confirm_close > prev_high):
-            return None
-
-        # --- build signal ---
-        entry = confirm_close
-
-        # Pullback low: lowest low in pullback zone
-        pullback_lows = [float(lows[j]) for j in range(lookback_start, i + 1)]
-        pullback_low = min(pullback_lows) if pullback_lows else low_val
-
-        # Stop loss below pullback low minus SL_ATR_MULT * ATR
-        sl = pullback_low - self.params["SL_ATR_MULT"] * atr_val
-
-        # Enforce minimum SL distance: max of ATR-based and absolute floor
-        risk_dist = abs(entry - sl)
-        min_risk = max(
-            self.params["SL_ATR_MULT"] * atr_val,
-            self.params["MIN_SL_PRICE"],
-        )
-        if risk_dist < min_risk:
-            sl = entry - min_risk
-            risk_dist = min_risk
-
-        if risk_dist == 0:
-            return None
-
-        # TP1: 2:1 R:R
-        tp1 = entry + self.params["TP1_RR"] * risk_dist
-
-        # TP2: nearest swing high above entry, or 3:1 R:R fallback
-        tp2 = self._find_swing_target_above(
-            entry, swing_high_indices, highs, i,
-        )
-        if tp2 is None or tp2 <= tp1:
-            tp2 = entry + self.params["TP2_RR"] * risk_dist
-
-        rr = round((tp1 - entry) / risk_dist, 2)
-
-        # --- confidence ---
-        confidence = self._compute_confidence(
-            direction=Direction.BUY,
-            close_val=confirm_close,
-            ema50_val=ema50_val,
-            atr_val=atr_val,
-            vwap=vwap,
-            has_vwap=has_vwap,
-            bar_idx=i + 1,
-            pullback_depth=abs(close_val - ema50_val),
-            ema_spread_widening=self._is_ema_spread_widening(
-                i, closes, ema50_val, ema200_val,
-            ),
-            ts=ts,
-        )
-
-        # --- session info ---
-        confirm_ts = pd.Timestamp(timestamps[i + 1]).to_pydatetime()
-        active_sessions = get_active_sessions(confirm_ts)
-        session = active_sessions[0] if active_sessions else None
-
-        reasoning = (
-            f"Bullish trend continuation: EMA-50 ({ema50_val:.2f}) above "
-            f"EMA-200 ({ema200_val:.2f}), pullback to EMA-50 zone, "
-            f"momentum confirmation candle. "
-            f"Entry at {entry:.2f}, SL below pullback low at {sl:.2f}."
-        )
-
-        return CandidateSignal(
-            strategy_name=self.name,
-            symbol="XAUUSD",
-            timeframe=self.required_timeframes[0],
-            direction=Direction.BUY,
-            entry_price=Decimal(str(round(entry, 2))),
-            stop_loss=Decimal(str(round(sl, 2))),
-            take_profit_1=Decimal(str(round(tp1, 2))),
-            take_profit_2=Decimal(str(round(tp2, 2))),
-            risk_reward=Decimal(str(round(rr, 2))),
-            confidence=Decimal(str(round(confidence, 2))),
-            reasoning=reasoning,
-            timestamp=confirm_ts,
-            session=session,
-        )
+        return out
 
     # ------------------------------------------------------------------
-    # Bearish continuation
-    # ------------------------------------------------------------------
-    def _check_bearish_continuation(
-        self,
-        i: int,
-        n: int,
-        ema50_val: float,
-        atr_val: float,
-        ema200_val: float,
-        opens: np.ndarray,
-        highs: np.ndarray,
-        lows: np.ndarray,
-        closes: np.ndarray,
-        timestamps: np.ndarray,
-        vwap: pd.Series,
-        has_vwap: bool,
-        swing_low_indices: np.ndarray,
-        ts: datetime,
-    ) -> CandidateSignal | None:
-        """Check for a bearish trend continuation at bar *i*."""
-        close_val = float(closes[i])
-        open_val = float(opens[i])
-        high_val = float(highs[i])
-        low_val = float(lows[i])
-
-        # --- pullback detection ---
-        # Price was below EMA-50 in recent bars
-        pb_mult = self.params["PULLBACK_ATR_MULT"]
-        was_below = False
-        lookback_start = max(0, i - int(self.params["LOOKBACK_PULLBACK"]))
-        for j in range(lookback_start, i):
-            if float(closes[j]) < ema50_val - pb_mult * atr_val:
-                was_below = True
-                break
-
-        if not was_below:
-            return None
-
-        # Current bar is in the pullback zone (within PULLBACK_ATR_MULT * ATR of EMA-50)
-        if not (ema50_val - pb_mult * atr_val <= close_val <= ema50_val + pb_mult * atr_val):
-            return None
-
-        # --- momentum confirmation ---
-        if i + 1 >= n:
-            return None
-
-        confirm_close = float(closes[i + 1])
-        confirm_open = float(opens[i + 1])
-        confirm_low = float(lows[i + 1])
-        prev_low = low_val
-
-        # Bearish: close < open (red candle) AND close < previous candle low
-        if not (confirm_close < confirm_open and confirm_close < prev_low):
-            return None
-
-        # --- build signal ---
-        entry = confirm_close
-
-        # Pullback high: highest high in pullback zone
-        pullback_highs = [float(highs[j]) for j in range(lookback_start, i + 1)]
-        pullback_high = max(pullback_highs) if pullback_highs else high_val
-
-        # Stop loss above pullback high plus SL_ATR_MULT * ATR
-        sl = pullback_high + self.params["SL_ATR_MULT"] * atr_val
-
-        # Enforce minimum SL distance: max of ATR-based and absolute floor
-        risk_dist = abs(sl - entry)
-        min_risk = max(
-            self.params["SL_ATR_MULT"] * atr_val,
-            self.params["MIN_SL_PRICE"],
-        )
-        if risk_dist < min_risk:
-            sl = entry + min_risk
-            risk_dist = min_risk
-
-        if risk_dist == 0:
-            return None
-
-        # TP1: 2:1 R:R
-        tp1 = entry - self.params["TP1_RR"] * risk_dist
-
-        # TP2: nearest swing low below entry, or 3:1 R:R fallback
-        tp2 = self._find_swing_target_below(
-            entry, swing_low_indices, lows, i,
-        )
-        if tp2 is None or tp2 >= tp1:
-            tp2 = entry - self.params["TP2_RR"] * risk_dist
-
-        rr = round((entry - tp1) / risk_dist, 2)
-
-        # --- confidence ---
-        confidence = self._compute_confidence(
-            direction=Direction.SELL,
-            close_val=confirm_close,
-            ema50_val=ema50_val,
-            atr_val=atr_val,
-            vwap=vwap,
-            has_vwap=has_vwap,
-            bar_idx=i + 1,
-            pullback_depth=abs(close_val - ema50_val),
-            ema_spread_widening=self._is_ema_spread_widening(
-                i, closes, ema50_val, ema200_val,
-            ),
-            ts=ts,
-        )
-
-        # --- session info ---
-        confirm_ts = pd.Timestamp(timestamps[i + 1]).to_pydatetime()
-        active_sessions = get_active_sessions(confirm_ts)
-        session = active_sessions[0] if active_sessions else None
-
-        reasoning = (
-            f"Bearish trend continuation: EMA-50 ({ema50_val:.2f}) below "
-            f"EMA-200 ({ema200_val:.2f}), pullback to EMA-50 zone, "
-            f"momentum confirmation candle. "
-            f"Entry at {entry:.2f}, SL above pullback high at {sl:.2f}."
-        )
-
-        return CandidateSignal(
-            strategy_name=self.name,
-            symbol="XAUUSD",
-            timeframe=self.required_timeframes[0],
-            direction=Direction.SELL,
-            entry_price=Decimal(str(round(entry, 2))),
-            stop_loss=Decimal(str(round(sl, 2))),
-            take_profit_1=Decimal(str(round(tp1, 2))),
-            take_profit_2=Decimal(str(round(tp2, 2))),
-            risk_reward=Decimal(str(round(rr, 2))),
-            confidence=Decimal(str(round(confidence, 2))),
-            reasoning=reasoning,
-            timestamp=confirm_ts,
-            session=session,
-        )
-
-    # ------------------------------------------------------------------
-    # Swing target helpers
-    # ------------------------------------------------------------------
-    def _find_swing_target_above(
-        self,
-        entry: float,
-        swing_high_indices: np.ndarray,
-        highs: np.ndarray,
-        current_bar: int,
-    ) -> float | None:
-        """Find the nearest swing high above entry for TP2 (BUY)."""
-        candidates = []
-        for idx in swing_high_indices:
-            if idx < current_bar:
-                sh_val = float(highs[idx])
-                if sh_val > entry:
-                    candidates.append(sh_val)
-        if candidates:
-            return min(candidates)  # nearest above
-        return None
-
-    def _find_swing_target_below(
-        self,
-        entry: float,
-        swing_low_indices: np.ndarray,
-        lows: np.ndarray,
-        current_bar: int,
-    ) -> float | None:
-        """Find the nearest swing low below entry for TP2 (SELL)."""
-        candidates = []
-        for idx in swing_low_indices:
-            if idx < current_bar:
-                sl_val = float(lows[idx])
-                if sl_val < entry:
-                    candidates.append(sl_val)
-        if candidates:
-            return max(candidates)  # nearest below
-        return None
-
-    # ------------------------------------------------------------------
-    # EMA spread widening check
-    # ------------------------------------------------------------------
-    def _is_ema_spread_widening(
-        self,
-        i: int,
-        closes: np.ndarray,
-        ema50_now: float,
-        ema200_now: float,
-    ) -> bool:
-        """Check if the EMA-50/200 spread is widening (trend strengthening).
-
-        Compares current spread with the spread 10 bars ago.
-        """
-        if i < 10:
+    def _adx_rising(self, adx: pd.Series, i: int, bars: int) -> bool:
+        if i < bars:
             return False
-        # We only have current ema values; approximate by checking if
-        # the current spread is larger than 10 bars ago would imply.
-        # Since we don't store historical EMA values per-bar, we use
-        # a simplified check: current spread > atr_val (already checked)
-        # and trend direction hasn't changed recently.
-        current_spread = abs(ema50_now - ema200_now)
-        # If spread is significant, consider it widening.
-        # A more precise check would require historical EMA arrays, but
-        # this is sufficient for confidence scoring.
-        return current_spread > 0
+        recent = adx.iloc[i - bars: i + 1].dropna().to_list()
+        if len(recent) < bars:
+            return False
+        return all(recent[k] >= recent[k - 1] for k in range(1, len(recent)))
 
-    # ------------------------------------------------------------------
-    # Confidence scoring
-    # ------------------------------------------------------------------
-    def _compute_confidence(
+    def _is_bullish_rejection_candle(
+        self, opens: np.ndarray, highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, i: int
+    ) -> bool:
+        o, h, l, cl = float(opens[i]), float(highs[i]), float(lows[i]), float(closes[i])
+        rng = h - l
+        if rng <= 0:
+            return False
+        body = abs(cl - o)
+        lower_wick = min(o, cl) - l
+        # Pin bar: lower wick >= 60% of range, body small
+        pin = lower_wick >= 0.6 * rng and body <= 0.35 * rng and cl > o
+        # Bullish engulfing
+        if i == 0:
+            engulf = False
+        else:
+            prev_o, prev_c = float(opens[i - 1]), float(closes[i - 1])
+            engulf = prev_c < prev_o and cl > o and cl >= prev_o and o <= prev_c
+        return pin or engulf
+
+    def _is_bearish_rejection_candle(
+        self, opens: np.ndarray, highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, i: int
+    ) -> bool:
+        o, h, l, cl = float(opens[i]), float(highs[i]), float(lows[i]), float(closes[i])
+        rng = h - l
+        if rng <= 0:
+            return False
+        body = abs(cl - o)
+        upper_wick = h - max(o, cl)
+        pin = upper_wick >= 0.6 * rng and body <= 0.35 * rng and cl < o
+        if i == 0:
+            engulf = False
+        else:
+            prev_o, prev_c = float(opens[i - 1]), float(closes[i - 1])
+            engulf = prev_c > prev_o and cl < o and cl <= prev_o and o >= prev_c
+        return pin or engulf
+
+    def _build_signal(
         self,
         direction: Direction,
-        close_val: float,
-        ema50_val: float,
+        confirm_i: int,
+        e50: float, e200: float,
         atr_val: float,
-        vwap: pd.Series,
-        has_vwap: bool,
-        bar_idx: int,
-        pullback_depth: float,
-        ema_spread_widening: bool,
-        ts: datetime,
-    ) -> float:
-        """Additive confidence score (0-100).
+        opens: np.ndarray, highs: np.ndarray, lows: np.ndarray, closes: np.ndarray,
+        timestamps: np.ndarray,
+        volumes: np.ndarray | None, has_volume: bool,
+    ) -> CandidateSignal | None:
+        # Stop-entry: order placed at confirmation_high + buf (BUY) or _low - buf (SELL)
+        buf = self.params["STOP_ENTRY_BUFFER_ATR"] * atr_val
+        if direction == Direction.BUY:
+            entry = float(highs[confirm_i]) + buf
+        else:
+            entry = float(lows[confirm_i]) - buf
 
-        Base 50, with bonuses for:
-          +10  VWAP confirms trend (price above VWAP for bullish, below for bearish)
-          +10  shallow pullback (< 0.5 * ATR from EMA-50)
-          +10  in London/NY overlap session
-          +10  EMA-50/200 spread is widening (trend strengthening)
-        """
-        score = float(self.params["BASE_CONFIDENCE"])
+        # Volume confirmation if available
+        if has_volume and volumes is not None and confirm_i >= 20:
+            avg_vol = float(np.mean(volumes[confirm_i - 20: confirm_i]))
+            if avg_vol > 0 and float(volumes[confirm_i]) < self.params["VOLUME_MULT"] * avg_vol:
+                return None
 
-        # Bonus: VWAP confirmation
-        if has_vwap and bar_idx < len(vwap):
-            vwap_val = float(vwap.iloc[bar_idx])
-            if not isnan(vwap_val):
-                if direction == Direction.BUY and close_val > vwap_val:
-                    score += 10
-                elif direction == Direction.SELL and close_val < vwap_val:
-                    score += 10
+        # Stop placement: beyond pullback extreme + buffer
+        cushion = max(
+            self.params["MIN_RISK_ATR"] * atr_val,
+            self.params["MIN_SL_PRICE"],
+            self.params["STOP_BUFFER_PTS"],
+        )
+        if direction == Direction.BUY:
+            sl = float(lows[confirm_i]) - cushion
+            risk = entry - sl
+        else:
+            sl = float(highs[confirm_i]) + cushion
+            risk = sl - entry
 
-        # Bonus: shallow pullback (< 0.5 * ATR from EMA-50)
-        if pullback_depth < 0.5 * atr_val:
-            score += 10
+        if risk <= 0:
+            return None
 
-        # Bonus: overlap session (highest liquidity)
-        if is_in_session(ts, "overlap"):
-            score += 10
+        if direction == Direction.BUY:
+            tp1 = entry + self.params["TP1_RR"] * risk
+            tp2 = entry + self.params["TP2_RR"] * risk
+        else:
+            tp1 = entry - self.params["TP1_RR"] * risk
+            tp2 = entry - self.params["TP2_RR"] * risk
 
-        # Bonus: EMA spread widening
-        if ema_spread_widening:
-            score += 10
+        rr = round(self.params["TP1_RR"], 2)
 
-        return min(score, 100.0)
+        confidence = float(self.params["BASE_CONFIDENCE"])
+        if abs(e50 - e200) > 1.0 * atr_val:
+            confidence += 10
+
+        ts = pd.Timestamp(timestamps[confirm_i]).to_pydatetime()
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        active_sessions = get_active_sessions(ts)
+        session = active_sessions[0] if active_sessions else None
+
+        reasoning = (
+            f"Trend-cont {direction.value}: EMA50 {e50:.2f} vs EMA200 {e200:.2f} "
+            f"(spread expanding), ADX gated, rejection candle at pullback. "
+            f"Stop-entry {entry:.2f}, SL {sl:.2f}."
+        )
+
+        return CandidateSignal(
+            strategy_name=self.name,
+            symbol="XAUUSD",
+            timeframe=self.required_timeframes[0],
+            direction=direction,
+            entry_price=Decimal(str(round(entry, 2))),
+            stop_loss=Decimal(str(round(sl, 2))),
+            take_profit_1=Decimal(str(round(tp1, 2))),
+            take_profit_2=Decimal(str(round(tp2, 2))),
+            risk_reward=Decimal(str(round(rr, 2))),
+            confidence=Decimal(str(round(min(confidence, 100.0), 2))),
+            reasoning=reasoning,
+            timestamp=ts,
+            session=session,
+        )

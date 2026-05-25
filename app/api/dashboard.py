@@ -605,3 +605,98 @@ async def performance_reset(session: AsyncSession = Depends(get_session)):
     deleted = (await session.execute(delete(StrategyPerformance))).rowcount
     await session.commit()
     return {"status": "reset", "records_deleted": deleted}
+
+
+# ---------------------------------------------------------------------------
+# V2 engine surface — regime / decisions / expectancy
+# ---------------------------------------------------------------------------
+
+@router.get("/regime")
+async def regime_state(session: AsyncSession = Depends(get_session)):
+    """Return current MarketContext snapshot (regime / HTF / session / news)."""
+    from app.engines.market_context import build_market_context
+
+    try:
+        ctx = await build_market_context(session)
+    except Exception as exc:
+        return {"error": str(exc)}
+    return {
+        "snapshot": ctx.as_snapshot(),
+        "liquidity": ctx.liquidity.as_snapshot(),
+        "news_next": (
+            {
+                "title": ctx.news.next_event_title,
+                "at": ctx.news.next_event_at.isoformat() if ctx.news.next_event_at else None,
+            } if ctx.news.next_event_title else None
+        ),
+    }
+
+
+@router.get("/decisions")
+async def recent_decisions(
+    session: AsyncSession = Depends(get_session),
+    limit: int = 50,
+):
+    """Return the most recent SignalDecision rows (accept + reject)."""
+    from app.models.signal_decision import SignalDecision
+
+    rows = (
+        await session.execute(
+            select(SignalDecision)
+            .order_by(SignalDecision.created_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+
+    return [
+        {
+            "id": r.id,
+            "created_at": r.created_at.isoformat(),
+            "strategy": r.strategy_name,
+            "direction": r.direction,
+            "entry_price": float(r.entry_price) if r.entry_price else None,
+            "accepted": r.accepted,
+            "score": float(r.score) if r.score else None,
+            "score_threshold": float(r.score_threshold) if r.score_threshold else None,
+            "regime": r.regime,
+            "htf_bias": r.htf_bias,
+            "session": r.session,
+            "news_blocked": r.news_blocked,
+            "rejection_reason": r.rejection_reason,
+            "score_breakdown": r.score_breakdown,
+            "signal_id": r.signal_id,
+        }
+        for r in rows
+    ]
+
+
+@router.get("/expectancy")
+async def expectancy(session: AsyncSession = Depends(get_session)):
+    """Return per-strategy expectancy plus attribution slices."""
+    from app.analytics.expectancy_tracker import ExpectancyTracker
+    from app.analytics.attribution_tracker import AttributionTracker
+
+    by_strat = await ExpectancyTracker().per_strategy(session)
+    attr = AttributionTracker()
+    by_regime = await attr.by_regime(session)
+    by_session = await attr.by_session(session)
+    by_score = await attr.by_score_bucket(session)
+
+    return {
+        "per_strategy": [
+            {
+                "strategy": r.strategy_name,
+                "trades": r.trades,
+                "wins": r.wins,
+                "win_rate": r.win_rate,
+                "avg_win_r": r.avg_win_r,
+                "avg_loss_r": r.avg_loss_r,
+                "expectancy_r": r.expectancy_r,
+                "profit_factor": r.profit_factor,
+            }
+            for r in by_strat
+        ],
+        "by_regime": [vars(b) for b in by_regime],
+        "by_session": [vars(b) for b in by_session],
+        "by_score": [vars(b) for b in by_score],
+    }

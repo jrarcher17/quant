@@ -1,19 +1,24 @@
-"""EMA Momentum strategy (STRAT-04).
+"""EMA Momentum v2.
 
-Detects strong trending moves on XAUUSD H1: fires when price is above both
-EMA-21 and EMA-50, both EMAs are rising, and a strong bullish/bearish candle
-confirms momentum. Designed for trending markets where pullback-based
-strategies produce no signals.
+Filters added on top of the original EMA-21/50/200 alignment trigger:
+
+    * Distance filter: reject if |close - EMA21| > 1.5 ATR (chasing)
+    * Streak: 2 consecutive H1 closes in trend direction, both above/below EMA21
+    * Range expansion: signal bar range > 1.2 ATR
+    * EMA21/50 spread today > spread 10 bars ago
+    * Exhaustion guard: RSI 25..75 only
+    * H4 alignment is enforced by the pipeline (HTFBiasEngine)
 """
 
-from datetime import datetime
+from __future__ import annotations
+
+from datetime import datetime, timezone
 from decimal import Decimal
 from math import isnan
+from typing import ClassVar
 
 import numpy as np
 import pandas as pd
-
-from typing import ClassVar
 
 from app.strategies.base import BaseStrategy, CandidateSignal, Direction
 from app.strategies.helpers import (
@@ -23,433 +28,210 @@ from app.strategies.helpers import (
     detect_swing_lows,
     get_active_sessions,
     is_in_any_major_session,
-    is_in_session,
 )
+from app.strategies.helpers.indicators import compute_rsi
 
 
 class EMAMomentumStrategy(BaseStrategy):
-    """Detects strong EMA-aligned momentum moves on XAUUSD H1.
-
-    A momentum setup occurs when:
-    1. EMA-21 > EMA-50 > EMA-200 (bullish) or reverse (bearish)
-    2. Both EMA-21 and EMA-50 are rising (slope check over last 5 bars)
-    3. A strong candle closes in the trend direction (body > 0.6 * ATR)
-    4. Price is above EMA-21 (bullish) or below EMA-21 (bearish)
-
-    No pullback required -- this fires in trending markets.
-    SL below recent swing low (bullish) or above recent swing high (bearish),
-    capped at 150 pips.
-    """
-
     name = "ema_momentum"
     required_timeframes = ["H1"]
-    min_candles = 200
+    min_candles = 220
 
-    # ------------------------------------------------------------------
-    # Default parameters (overridable via constructor)
-    # ------------------------------------------------------------------
     DEFAULT_PARAMS: ClassVar[dict[str, float]] = {
         "EMA_FAST": 21,
         "EMA_MID": 50,
         "EMA_SLOW": 200,
         "ATR_LENGTH": 14,
-        "BODY_ATR_MULT": 0.4,          # Min candle body as fraction of ATR
-        "SL_ATR_MULT": 1.5,            # SL padding below swing low
-        "MIN_RISK_ATR": 1.5,           # Minimum SL distance in ATR units
-        "MIN_SL_PRICE": 10.0,          # Absolute minimum SL distance in price ($)
-        "TP1_RR": 1.5,                 # TP1 risk:reward
-        "TP2_RR": 3.0,                 # TP2 risk:reward
-        "EMA_SLOPE_BARS": 5,           # Bars to check EMA slope
-        "SWING_ORDER": 5,              # Swing detection lookback
-        "SWING_LOOKBACK": 20,          # Bars to search for swing low/high
-        "BASE_CONFIDENCE": 50,
-        "MAX_SL_PIPS": 500.0,          # Hard cap on SL distance in pips
-        "PIP_VALUE": 0.10,             # XAUUSD pip value
+        "MIN_RISK_ATR": 1.5,
+        "MIN_SL_PRICE": 8.0,
+        "STOP_BUFFER_PTS": 5.0,
+        "MAX_DIST_FROM_EMA21_ATR": 1.5,
+        "STREAK_BARS": 2,
+        "RANGE_EXPANSION_ATR": 1.2,
+        "SPREAD_LOOKBACK_BARS": 10,
+        "RSI_MAX": 75.0,
+        "RSI_MIN": 25.0,
+        "TP1_RR": 1.0,
+        "TP2_RR": 2.5,
+        "BASE_CONFIDENCE": 60,
     }
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
     def analyze(self, candles: pd.DataFrame) -> list[CandidateSignal]:
-        """Scan *candles* for EMA momentum setups.
-
-        Args:
-            candles: DataFrame with columns [timestamp, open, high, low,
-                     close] and optionally [volume].  Values are floats.
-
-        Returns:
-            List of CandidateSignal instances (may be empty).
-
-        Raises:
-            InsufficientDataError: If len(candles) < min_candles.
-            ValueError: If required columns are missing.
-        """
         self.validate_data(candles)
-        candles = candles.copy()
+        c = candles.copy().reset_index(drop=True)
 
-        # --- indicators ---
-        ema_fast = compute_ema(candles["close"], int(self.params["EMA_FAST"]))
-        ema_mid = compute_ema(candles["close"], int(self.params["EMA_MID"]))
-        ema_slow = compute_ema(candles["close"], int(self.params["EMA_SLOW"]))
-        atr = compute_atr(
-            candles["high"], candles["low"], candles["close"],
-            length=int(self.params["ATR_LENGTH"]),
-        )
+        ema_f = compute_ema(c["close"], int(self.params["EMA_FAST"]))
+        ema_m = compute_ema(c["close"], int(self.params["EMA_MID"]))
+        ema_s = compute_ema(c["close"], int(self.params["EMA_SLOW"]))
+        atr = compute_atr(c["high"], c["low"], c["close"], length=int(self.params["ATR_LENGTH"]))
+        rsi = compute_rsi(c["close"], length=14)
 
-        # Swing detection for SL placement
-        swing_high_indices = detect_swing_highs(
-            candles["high"], order=int(self.params["SWING_ORDER"]),
-        )
-        swing_low_indices = detect_swing_lows(
-            candles["low"], order=int(self.params["SWING_ORDER"]),
-        )
+        swing_highs = detect_swing_highs(c["high"], order=5)
+        swing_lows = detect_swing_lows(c["low"], order=5)
 
-        opens = candles["open"].values
-        highs = candles["high"].values
-        lows = candles["low"].values
-        closes = candles["close"].values
-        timestamps = candles["timestamp"].values
+        opens = c["open"].values
+        highs = c["high"].values
+        lows = c["low"].values
+        closes = c["close"].values
+        timestamps = c["timestamp"].values
 
-        n = len(candles)
-        signals: list[CandidateSignal] = []
-        slope_bars = int(self.params["EMA_SLOPE_BARS"])
+        n = len(c)
+        out: list[CandidateSignal] = []
 
         for i in range(self.min_candles, n):
             atr_val = float(atr.iloc[i])
             if isnan(atr_val) or atr_val <= 0:
                 continue
 
-            ema_f = float(ema_fast.iloc[i])
-            ema_m = float(ema_mid.iloc[i])
-            ema_s = float(ema_slow.iloc[i])
-
-            if isnan(ema_f) or isnan(ema_m) or isnan(ema_s):
+            ef = float(ema_f.iloc[i])
+            em = float(ema_m.iloc[i])
+            es = float(ema_s.iloc[i])
+            if isnan(ef) or isnan(em) or isnan(es):
                 continue
 
-            # --- session filter: any major session (Asian/London/NY) ---
             ts = pd.Timestamp(timestamps[i]).to_pydatetime()
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
             if not is_in_any_major_session(ts):
                 continue
 
-            close_val = float(closes[i])
-            open_val = float(opens[i])
+            close_i = float(closes[i])
+            range_i = float(highs[i]) - float(lows[i])
 
-            # Candle body strength
-            candle_body = abs(close_val - open_val)
-            if candle_body < self.params["BODY_ATR_MULT"] * atr_val:
+            # Range expansion
+            if range_i < self.params["RANGE_EXPANSION_ATR"] * atr_val:
                 continue
 
-            # --- Check EMA alignment and slope ---
-            # Need historical EMA values for slope check
-            if i < slope_bars:
+            # Spread expansion
+            lb = int(self.params["SPREAD_LOOKBACK_BARS"])
+            if i < lb:
+                continue
+            spread_now = abs(ef - em)
+            spread_then = abs(float(ema_f.iloc[i - lb]) - float(ema_m.iloc[i - lb]))
+            if spread_now <= spread_then:
                 continue
 
-            ema_f_prev = float(ema_fast.iloc[i - slope_bars])
-            ema_m_prev = float(ema_mid.iloc[i - slope_bars])
-
-            if isnan(ema_f_prev) or isnan(ema_m_prev):
+            # Distance filter
+            if abs(close_i - ef) > self.params["MAX_DIST_FROM_EMA21_ATR"] * atr_val:
                 continue
 
-            # Bullish: EMA-21 > EMA-50 > EMA-200, both rising, bullish candle
-            bullish = (
-                ema_f > ema_m > ema_s
-                and ema_f > ema_f_prev  # EMA-21 rising
-                and ema_m > ema_m_prev  # EMA-50 rising
-                and close_val > open_val  # green candle
-                and close_val > ema_f  # price above EMA-21
+            # RSI exhaustion guard
+            rsi_now = float(rsi.iloc[i]) if not isnan(rsi.iloc[i]) else 50.0
+            if rsi_now > self.params["RSI_MAX"] or rsi_now < self.params["RSI_MIN"]:
+                continue
+
+            # EMA alignment
+            bullish = ef > em > es and close_i > ef
+            bearish = ef < em < es and close_i < ef
+            if not (bullish or bearish):
+                continue
+
+            # Streak: STREAK_BARS consecutive directional closes above/below EMA21
+            streak = int(self.params["STREAK_BARS"])
+            ok = True
+            for k in range(streak):
+                idx = i - k
+                if idx < 1:
+                    ok = False
+                    break
+                ck = float(closes[idx])
+                ok_bar = (ck > float(opens[idx])) if bullish else (ck < float(opens[idx]))
+                ok_above_ema = (ck > float(ema_f.iloc[idx])) if bullish else (ck < float(ema_f.iloc[idx]))
+                if not (ok_bar and ok_above_ema):
+                    ok = False
+                    break
+            if not ok:
+                continue
+
+            sig = self._build(
+                bullish=bullish, i=i, atr_val=atr_val,
+                ef=ef, em=em, es=es,
+                opens=opens, highs=highs, lows=lows, closes=closes,
+                timestamps=timestamps,
+                swing_highs=swing_highs, swing_lows=swing_lows,
+                ts=ts,
             )
+            if sig is not None:
+                out.append(sig)
 
-            # Bearish: EMA-21 < EMA-50 < EMA-200, both falling, bearish candle
-            bearish = (
-                ema_f < ema_m < ema_s
-                and ema_f < ema_f_prev  # EMA-21 falling
-                and ema_m < ema_m_prev  # EMA-50 falling
-                and close_val < open_val  # red candle
-                and close_val < ema_f  # price below EMA-21
-            )
+        return out
 
-            if bullish:
-                signal = self._build_bullish_signal(
-                    i, close_val, atr_val,
-                    ema_f, ema_m, ema_s,
-                    highs, lows, timestamps,
-                    swing_low_indices, swing_high_indices,
-                    ts,
-                )
-                if signal is not None:
-                    signals.append(signal)
-
-            elif bearish:
-                signal = self._build_bearish_signal(
-                    i, close_val, atr_val,
-                    ema_f, ema_m, ema_s,
-                    highs, lows, timestamps,
-                    swing_high_indices, swing_low_indices,
-                    ts,
-                )
-                if signal is not None:
-                    signals.append(signal)
-
-        return signals
-
-    # ------------------------------------------------------------------
-    # Signal builders
-    # ------------------------------------------------------------------
-    def _build_bullish_signal(
+    def _build(
         self,
-        i: int,
-        entry: float,
-        atr_val: float,
-        ema_f: float,
-        ema_m: float,
-        ema_s: float,
-        highs: np.ndarray,
-        lows: np.ndarray,
+        bullish: bool, i: int, atr_val: float,
+        ef: float, em: float, es: float,
+        opens: np.ndarray, highs: np.ndarray, lows: np.ndarray, closes: np.ndarray,
         timestamps: np.ndarray,
-        swing_low_indices: np.ndarray,
-        swing_high_indices: np.ndarray,
+        swing_highs: np.ndarray, swing_lows: np.ndarray,
         ts: datetime,
     ) -> CandidateSignal | None:
-        """Build a bullish EMA momentum signal."""
-        lookback = int(self.params["SWING_LOOKBACK"])
-        max_sl_pips = self.params["MAX_SL_PIPS"]
-        pip_value = self.params["PIP_VALUE"]
-
-        # SL: recent swing low - padding
-        sl = self._find_recent_swing_low(
-            i, lows, swing_low_indices, lookback
-        )
-        if sl is None:
-            # Fallback: lowest low in lookback
-            start = max(0, i - lookback)
-            sl = float(np.min(lows[start:i + 1]))
-
-        sl -= self.params["SL_ATR_MULT"] * atr_val
-
-        # Enforce minimum SL distance: max of ATR-based and absolute floor
-        risk_dist = abs(entry - sl)
-        min_risk = max(
+        entry = float(closes[i])
+        cushion = max(
             self.params["MIN_RISK_ATR"] * atr_val,
             self.params["MIN_SL_PRICE"],
+            self.params["STOP_BUFFER_PTS"],
         )
-        if risk_dist < min_risk:
-            sl = entry - min_risk
-            risk_dist = min_risk
 
-        # Cap SL distance
-        sl_pips = risk_dist / pip_value
-        if sl_pips > max_sl_pips:
-            sl = entry - max_sl_pips * pip_value
-            risk_dist = abs(entry - sl)
+        # SL beyond recent swing
+        if bullish:
+            recent_lows = [
+                float(lows[k]) for k in swing_lows
+                if k < i and k >= i - 30
+            ]
+            if not recent_lows:
+                recent_lows = [float(np.min(lows[max(0, i - 30): i + 1]))]
+            sl_anchor = min(recent_lows)
+            sl = sl_anchor - cushion
+            risk = entry - sl
+        else:
+            recent_highs = [
+                float(highs[k]) for k in swing_highs
+                if k < i and k >= i - 30
+            ]
+            if not recent_highs:
+                recent_highs = [float(np.max(highs[max(0, i - 30): i + 1]))]
+            sl_anchor = max(recent_highs)
+            sl = sl_anchor + cushion
+            risk = sl - entry
 
-        if risk_dist <= 0:
+        if risk <= 0:
             return None
 
-        tp1 = entry + self.params["TP1_RR"] * risk_dist
-        tp2 = entry + self.params["TP2_RR"] * risk_dist
+        if bullish:
+            tp1 = entry + self.params["TP1_RR"] * risk
+            tp2 = entry + self.params["TP2_RR"] * risk
+        else:
+            tp1 = entry - self.params["TP1_RR"] * risk
+            tp2 = entry - self.params["TP2_RR"] * risk
 
-        rr = round((tp1 - entry) / risk_dist, 2)
-
-        confidence = self._compute_confidence(
-            direction=Direction.BUY,
-            entry=entry,
-            ema_f=ema_f,
-            ema_m=ema_m,
-            ema_s=ema_s,
-            atr_val=atr_val,
-            ts=ts,
-        )
+        confidence = float(self.params["BASE_CONFIDENCE"])
+        if abs(em - es) > 2.0 * atr_val:
+            confidence += 10
+        if abs(ef - em) > 1.0 * atr_val:
+            confidence += 10
 
         active_sessions = get_active_sessions(ts)
         session = active_sessions[0] if active_sessions else None
 
+        direction = Direction.BUY if bullish else Direction.SELL
         reasoning = (
-            f"Bullish EMA momentum: EMA-21 ({ema_f:.2f}) > EMA-50 ({ema_m:.2f}) "
-            f"> EMA-200 ({ema_s:.2f}), all rising. Strong bullish candle at "
-            f"{entry:.2f}. SL at {sl:.2f}, TP1 at {tp1:.2f}."
+            f"EMA-momentum {direction.value}: EMA21={ef:.2f} EMA50={em:.2f} EMA200={es:.2f} "
+            f"(spread expanding), streak confirmed, range-expanded bar. "
+            f"Entry {entry:.2f}, SL {sl:.2f}."
         )
 
         return CandidateSignal(
             strategy_name=self.name,
             symbol="XAUUSD",
             timeframe=self.required_timeframes[0],
-            direction=Direction.BUY,
+            direction=direction,
             entry_price=Decimal(str(round(entry, 2))),
             stop_loss=Decimal(str(round(sl, 2))),
             take_profit_1=Decimal(str(round(tp1, 2))),
             take_profit_2=Decimal(str(round(tp2, 2))),
-            risk_reward=Decimal(str(round(rr, 2))),
-            confidence=Decimal(str(round(confidence, 2))),
+            risk_reward=Decimal(str(round(self.params["TP1_RR"], 2))),
+            confidence=Decimal(str(round(min(confidence, 100.0), 2))),
             reasoning=reasoning,
             timestamp=ts,
             session=session,
         )
-
-    def _build_bearish_signal(
-        self,
-        i: int,
-        entry: float,
-        atr_val: float,
-        ema_f: float,
-        ema_m: float,
-        ema_s: float,
-        highs: np.ndarray,
-        lows: np.ndarray,
-        timestamps: np.ndarray,
-        swing_high_indices: np.ndarray,
-        swing_low_indices: np.ndarray,
-        ts: datetime,
-    ) -> CandidateSignal | None:
-        """Build a bearish EMA momentum signal."""
-        lookback = int(self.params["SWING_LOOKBACK"])
-        max_sl_pips = self.params["MAX_SL_PIPS"]
-        pip_value = self.params["PIP_VALUE"]
-
-        # SL: recent swing high + padding
-        sl = self._find_recent_swing_high(
-            i, highs, swing_high_indices, lookback
-        )
-        if sl is None:
-            # Fallback: highest high in lookback
-            start = max(0, i - lookback)
-            sl = float(np.max(highs[start:i + 1]))
-
-        sl += self.params["SL_ATR_MULT"] * atr_val
-
-        # Enforce minimum SL distance: max of ATR-based and absolute floor
-        risk_dist = abs(sl - entry)
-        min_risk = max(
-            self.params["MIN_RISK_ATR"] * atr_val,
-            self.params["MIN_SL_PRICE"],
-        )
-        if risk_dist < min_risk:
-            sl = entry + min_risk
-            risk_dist = min_risk
-
-        # Cap SL distance
-        sl_pips = risk_dist / pip_value
-        if sl_pips > max_sl_pips:
-            sl = entry + max_sl_pips * pip_value
-            risk_dist = abs(sl - entry)
-
-        if risk_dist <= 0:
-            return None
-
-        tp1 = entry - self.params["TP1_RR"] * risk_dist
-        tp2 = entry - self.params["TP2_RR"] * risk_dist
-
-        rr = round((entry - tp1) / risk_dist, 2)
-
-        confidence = self._compute_confidence(
-            direction=Direction.SELL,
-            entry=entry,
-            ema_f=ema_f,
-            ema_m=ema_m,
-            ema_s=ema_s,
-            atr_val=atr_val,
-            ts=ts,
-        )
-
-        active_sessions = get_active_sessions(ts)
-        session = active_sessions[0] if active_sessions else None
-
-        reasoning = (
-            f"Bearish EMA momentum: EMA-21 ({ema_f:.2f}) < EMA-50 ({ema_m:.2f}) "
-            f"< EMA-200 ({ema_s:.2f}), all falling. Strong bearish candle at "
-            f"{entry:.2f}. SL at {sl:.2f}, TP1 at {tp1:.2f}."
-        )
-
-        return CandidateSignal(
-            strategy_name=self.name,
-            symbol="XAUUSD",
-            timeframe=self.required_timeframes[0],
-            direction=Direction.SELL,
-            entry_price=Decimal(str(round(entry, 2))),
-            stop_loss=Decimal(str(round(sl, 2))),
-            take_profit_1=Decimal(str(round(tp1, 2))),
-            take_profit_2=Decimal(str(round(tp2, 2))),
-            risk_reward=Decimal(str(round(rr, 2))),
-            confidence=Decimal(str(round(confidence, 2))),
-            reasoning=reasoning,
-            timestamp=ts,
-            session=session,
-        )
-
-    # ------------------------------------------------------------------
-    # Swing helpers
-    # ------------------------------------------------------------------
-    def _find_recent_swing_low(
-        self,
-        i: int,
-        lows: np.ndarray,
-        swing_low_indices: np.ndarray,
-        lookback: int,
-    ) -> float | None:
-        """Find the most recent swing low within lookback bars before bar i."""
-        start = max(0, i - lookback)
-        candidates = [
-            float(lows[idx])
-            for idx in swing_low_indices
-            if start <= idx < i
-        ]
-        return min(candidates) if candidates else None
-
-    def _find_recent_swing_high(
-        self,
-        i: int,
-        highs: np.ndarray,
-        swing_high_indices: np.ndarray,
-        lookback: int,
-    ) -> float | None:
-        """Find the most recent swing high within lookback bars before bar i."""
-        start = max(0, i - lookback)
-        candidates = [
-            float(highs[idx])
-            for idx in swing_high_indices
-            if start <= idx < i
-        ]
-        return max(candidates) if candidates else None
-
-    # ------------------------------------------------------------------
-    # Confidence scoring
-    # ------------------------------------------------------------------
-    def _compute_confidence(
-        self,
-        direction: Direction,
-        entry: float,
-        ema_f: float,
-        ema_m: float,
-        ema_s: float,
-        atr_val: float,
-        ts: datetime,
-    ) -> float:
-        """Additive confidence score (0-100).
-
-        Base 50, with bonuses for:
-          +10  strong EMA separation (EMA-21/50 spread > 1.0 * ATR)
-          +10  price well above/below EMA-21 (distance > 0.3 * ATR)
-          +10  London/NY overlap session
-          +10  all three EMAs strongly aligned (EMA-50/200 spread > 2.0 * ATR)
-        """
-        score = float(self.params["BASE_CONFIDENCE"])
-
-        # Strong EMA-21/50 separation
-        ema_fast_mid_spread = abs(ema_f - ema_m)
-        if ema_fast_mid_spread > 1.0 * atr_val:
-            score += 10
-
-        # Price distance from EMA-21
-        price_ema_dist = abs(entry - ema_f)
-        if price_ema_dist > 0.3 * atr_val:
-            score += 10
-
-        # Overlap session bonus
-        if is_in_session(ts, "overlap"):
-            score += 10
-
-        # All three EMAs strongly aligned
-        ema_mid_slow_spread = abs(ema_m - ema_s)
-        if ema_mid_slow_spread > 2.0 * atr_val:
-            score += 10
-
-        return min(score, 100.0)

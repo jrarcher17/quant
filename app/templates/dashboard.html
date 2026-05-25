@@ -831,6 +831,34 @@
             </div>
         </div>
 
+        <!-- ENGINE V2 STATE CARD -->
+        <div class="card" style="margin-bottom:24px;">
+            <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+                <div>
+                    <div class="card-title">Engine v2 — Market Context</div>
+                    <div style="font-size:10px;color:var(--text-dim);margin-top:2px;">Regime · HTF bias · session · news · volatility</div>
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="stat-grid" style="grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px;">
+                    <div class="stat-card"><div class="stat-label">Regime</div><div class="stat-value accent" id="v2-regime">--</div></div>
+                    <div class="stat-card"><div class="stat-label">HTF Bias</div><div class="stat-value accent" id="v2-htf">--</div></div>
+                    <div class="stat-card"><div class="stat-label">Session</div><div class="stat-value accent" id="v2-session">--</div></div>
+                    <div class="stat-card"><div class="stat-label">News</div><div class="stat-value accent" id="v2-news">--</div></div>
+                    <div class="stat-card"><div class="stat-label">ADX (H1)</div><div class="stat-value accent" id="v2-adx">--</div></div>
+                    <div class="stat-card"><div class="stat-label">ATR Pct</div><div class="stat-value accent" id="v2-atrpct">--</div></div>
+                </div>
+                <div style="margin-top:12px;">
+                    <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;">Recent decisions (last 10)</div>
+                    <table class="table" id="v2-decisions" style="font-size:11px;">
+                        <thead><tr><th>Time</th><th>Strategy</th><th>Dir</th><th>Score</th><th>Regime</th><th>Status</th><th>Reason</th></tr></thead>
+                        <tbody id="v2-decisions-body"></tbody>
+                    </table>
+                    <div class="empty-state" id="v2-decisions-empty" style="display:none;">No decisions yet</div>
+                </div>
+            </div>
+        </div>
+
         <!-- PAPER TRADING (full width, where chart used to be) -->
         <div class="card" style="margin-bottom:24px;">
             <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
@@ -1865,10 +1893,51 @@ refreshDashboard();
 refreshPrice();
 refreshPortfolio();
 
+async function refreshEngineV2() {
+    try {
+        const [regimeResp, decResp] = await Promise.all([
+            fetch('/dashboard/regime'),
+            fetch('/dashboard/decisions?limit=10'),
+        ]);
+        if (regimeResp.ok) {
+            const r = await regimeResp.json();
+            if (r && r.snapshot) {
+                document.getElementById('v2-regime').textContent = r.snapshot.regime || '--';
+                document.getElementById('v2-htf').textContent = r.snapshot.htf_bias || '--';
+                document.getElementById('v2-session').textContent = r.snapshot.session || '--';
+                document.getElementById('v2-news').textContent = r.snapshot.news_blocked ? 'BLOCKED' : 'clear';
+                document.getElementById('v2-adx').textContent = (r.snapshot.adx ?? '--').toString();
+                document.getElementById('v2-atrpct').textContent = (r.snapshot.atr_percentile ?? '--').toString();
+            }
+        }
+        if (decResp.ok) {
+            const decisions = await decResp.json();
+            const body = document.getElementById('v2-decisions-body');
+            const empty = document.getElementById('v2-decisions-empty');
+            if (Array.isArray(decisions) && decisions.length) {
+                empty.style.display = 'none';
+                body.innerHTML = decisions.map(d => {
+                    const status = d.accepted ? '<span style="color:#10b981;">PASS</span>' : '<span style="color:#ef4444;">REJECT</span>';
+                    const reason = d.accepted ? '-' : (d.rejection_reason || '-');
+                    const score = (d.score !== null && d.score !== undefined) ? d.score.toFixed(2) : '-';
+                    const t = new Date(d.created_at).toLocaleTimeString();
+                    return `<tr><td>${t}</td><td>${d.strategy}</td><td>${d.direction || '-'}</td><td>${score}</td><td>${d.regime || '-'}</td><td>${status}</td><td style="font-size:10px;color:var(--text-dim);">${reason}</td></tr>`;
+                }).join('');
+            } else {
+                empty.style.display = '';
+                body.innerHTML = '';
+            }
+        }
+    } catch (err) { console.error('refreshEngineV2 failed:', err); }
+}
+
+refreshEngineV2();
+
 // Auto-refresh every 30s
 setInterval(refreshDashboard, 30000);
 setInterval(refreshPrice, 30000);
 setInterval(refreshPortfolio, 30000);
+setInterval(refreshEngineV2, 30000);
 </script>
 
 </body>

@@ -16,6 +16,7 @@ from app.workers.jobs import (
     check_paper_trades,
     refresh_candles,
     refresh_macro_symbols,
+    refresh_news_calendar_job,
     run_daily_backtests,
     run_data_retention,
     run_param_optimization,
@@ -165,4 +166,13 @@ def register_jobs() -> None:
     )
     logger.info("Registered job: check_paper_trades (every 2 minutes)")
 
-    logger.info("All {count} jobs registered", count=12)
+    scheduler.add_job(
+        refresh_news_calendar_job,
+        trigger=CronTrigger(hour="0,12", minute=10, timezone="UTC"),
+        id="refresh_news_calendar",
+        name="Refresh news calendar",
+        replace_existing=True,
+    )
+    logger.info("Registered job: refresh_news_calendar (twice daily at 00:10/12:10 UTC)")
+
+    logger.info("All {count} jobs registered", count=13)

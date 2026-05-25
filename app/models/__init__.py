@@ -11,6 +11,8 @@ from app.models.optimized_params import OptimizedParams
 from app.models.trade_settings import TradeSettings
 from app.models.paper_trade import PaperAccount, PaperTrade
 from app.models.reversal_log import ReversalLog
+from app.models.signal_decision import SignalDecision
+from app.models.news_event import NewsEvent
 
 __all__ = [
     "Base",
@@ -25,4 +27,6 @@ __all__ = [
     "PaperAccount",
     "PaperTrade",
     "ReversalLog",
+    "SignalDecision",
+    "NewsEvent",
 ]

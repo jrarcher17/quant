@@ -255,6 +255,39 @@ async def check_open_positions(session: AsyncSession, live_price: Decimal) -> No
     await session.commit()
 
 
+async def update_mae_mfe(session: AsyncSession, live_price: Decimal) -> None:
+    """Track running max-adverse / max-favourable excursion for open trades.
+
+    Called every paper-broker tick. Stores excursions in price points so they
+    are independent of position size.
+    """
+    rows = (
+        await session.execute(select(PaperTrade).where(PaperTrade.status == "open"))
+    ).scalars().all()
+    if not rows:
+        return
+
+    changed = False
+    for t in rows:
+        entry = t.entry_price
+        if t.direction == "BUY":
+            adverse = max(Decimal("0"), entry - live_price)
+            favourable = max(Decimal("0"), live_price - entry)
+        else:
+            adverse = max(Decimal("0"), live_price - entry)
+            favourable = max(Decimal("0"), entry - live_price)
+
+        if t.mae_pts is None or adverse > t.mae_pts:
+            t.mae_pts = adverse.quantize(Decimal("0.01"))
+            changed = True
+        if t.mfe_pts is None or favourable > t.mfe_pts:
+            t.mfe_pts = favourable.quantize(Decimal("0.01"))
+            changed = True
+
+    if changed:
+        await session.flush()
+
+
 async def expire_stale_paper_trades(session: AsyncSession, live_price: Decimal) -> None:
     """Close open paper trades whose linked signal has expired, at live_price.
 

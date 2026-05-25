@@ -1,56 +1,83 @@
-"""Signal pipeline orchestrator: the heartbeat of the trading system.
+"""SignalPipeline v2 — context-aware orchestrator.
 
-Wires StrategySelector, SignalGenerator, RiskManager, GoldIntelligence,
-and MacroBiasFilter into a sequential flow that runs every hour:
+New flow per scanner tick:
 
-    expire stale -> compute macro bias -> select strategy ->
-    generate candidates -> validate (R:R, confidence, dedup, bias) ->
-    apply macro bias adjustment -> risk check ->
-    H4 confluence boost -> gold enrichment -> persist.
+    1. Build MarketContext (regime / HTF / liquidity / session / news)
+    2. If session blocked or news blocked or regime CHOP → emit no signals
+    3. RegimeStrategySelector.allowed(regime) → list of strategy names
+    4. For each allowed strategy:
+         a. generate candidates (existing SignalGenerator)
+         b. run lightweight validation (R:R, dedup) — kept from old pipeline
+         c. for each candidate:
+              - apply structural stop (StopEngine)
+              - apply dynamic target (TargetEngine)
+              - update entry-relative SL/TP on the candidate
+              - score with ScoringEngine
+              - log decision (accept or reject) via DecisionLogger
+         d. keep the highest-scoring candidate per strategy
+    5. Across allowed strategies, persist at most ONE highest-scoring signal
+       that beats the score threshold.
+    6. Old enrichment (gold intel, H4 confluence boost, macro bias) still
+       runs but is informational only — it shifts confidence, never blocks.
 
-Exports:
-    SignalPipeline  -- main orchestrator class
+This pipeline is the public `SignalPipeline.run()` so existing callers
+(jobs.py / `run_signal_scanner`) keep working without changes.
 """
 
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from loguru import logger
-from sqlalchemy import and_, func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
-from app.models.candle import Candle
+from app.engines.market_context import MarketContext, build_market_context
+from app.engines.regime_engine import Regime
+from app.engines.scoring_engine import (
+    KIND_BREAKOUT,
+    KIND_EMA_MOM,
+    KIND_LIQ_SWEEP,
+    KIND_TREND_CONT,
+    ScoringEngine,
+    SignalScore,
+)
+from app.engines.strategy_selector_v2 import RegimeStrategySelector
 from app.models.signal import Signal
 from app.models.strategy import Strategy as StrategyModel
-from app.services.gold_intelligence import GoldIntelligence
-from app.services.macro_filter import MacroBias, MacroBiasFilter
-from app.services.risk_manager import RiskManager
-from app.services.signal_generator import SignalGenerator
-from app.services.strategy_selector import StrategySelector
-from app.services.trade_settings import get_trade_settings
-from app.strategies.helpers.indicators import compute_atr
+from app.risk.stop_engine import StopEngine, StopPlan
+from app.risk.target_engine import TargetEngine, TargetPlan
+from app.services.decision_logger import DecisionLogger
+
+if TYPE_CHECKING:
+    from app.services.gold_intelligence import GoldIntelligence
+    from app.services.macro_filter import MacroBiasFilter
+    from app.services.risk_manager import RiskManager
+    from app.services.signal_generator import SignalGenerator
+    from app.services.strategy_selector import StrategySelector
 
 
+# Backwards-compat token for any callers still importing it from the old pipeline.
 HEDGE_REASONING_TAG = "[HEDGE: opposite-direction override]"
+
+_KIND_BY_STRATEGY = {
+    "liquidity_sweep": KIND_LIQ_SWEEP,
+    "trend_continuation": KIND_TREND_CONT,
+    "breakout_expansion": KIND_BREAKOUT,
+    "ema_momentum": KIND_EMA_MOM,
+}
 
 
 class SignalPipeline:
-    """Orchestrates the full signal generation pipeline.
-
-    Flow: expire stale -> select strategy -> generate candidates ->
-          validate (R:R, confidence, dedup, bias) -> risk check ->
-          H4 confluence boost -> gold enrichment -> persist.
-    """
-
     def __init__(
         self,
-        selector: StrategySelector,
-        generator: SignalGenerator,
-        risk_manager: RiskManager,
-        gold_intel: GoldIntelligence,
-        macro_filter: MacroBiasFilter | None = None,
+        selector: "StrategySelector",
+        generator: "SignalGenerator",
+        risk_manager: "RiskManager",
+        gold_intel: "GoldIntelligence",
+        macro_filter: "MacroBiasFilter | None" = None,
+        score_threshold: float = 6.5,
     ) -> None:
         self.selector = selector
         self.generator = generator
@@ -58,337 +85,225 @@ class SignalPipeline:
         self.gold_intel = gold_intel
         self.macro_filter = macro_filter
 
+        self.regime_selector = RegimeStrategySelector()
+        self.scoring = ScoringEngine()
+        self.stop_engine = StopEngine()
+        self.target_engine = TargetEngine()
+        self.score_threshold = score_threshold
+
+    # ------------------------------------------------------------------
     async def run(self, session: AsyncSession) -> list[Signal]:
-        """Execute the full signal pipeline.
+        # 0. Expire stale signals (kept from old pipeline)
+        try:
+            await self.generator.expire_stale_signals(session)
+        except Exception:
+            logger.exception("Pipeline: expire_stale_signals failed (non-fatal)")
 
-        Tries ALL qualifying strategies in ranked order (best first) until
-        one produces a valid signal. This prevents the system from going
-        silent when the top-ranked strategy has no setups but others do.
+        # 1. Build context
+        ctx = await build_market_context(session)
 
-        Steps:
-            1. Expire stale signals
-            2. Rank all strategies
-            2.5. Compute macro bias (DXY trend + VIX risk-off, once per run)
-            3. For each strategy (best first):
-               a. Generate candidate signals
-               b. Validate candidates (R:R, confidence, dedup, bias)
-               c. Pick best candidate
-               d. Apply macro bias confidence adjustment (+5 aligned / -15 opposed)
-               e. Check opposite-direction block
-               f. Risk check
-               g. If approved -> proceed to enrichment & persist
-            4. H4 confluence boost
-            5. DXY correlation
-            6. Gold intelligence enrichment
-            7. Persist approved signals to DB
-
-        Args:
-            session: Async database session.
-
-        Returns:
-            List of persisted Signal ORM objects.
-        """
-        # 1. Expire stale signals
-        expired_count = await self.generator.expire_stale_signals(session)
-        logger.info("Expired {} stale signal(s) before scan", expired_count)
-
-        # 2. Rank all strategies
-        ranked = await self.selector.select_all_ranked(session)
-        if not ranked:
-            logger.warning(
-                "No qualifying strategy found, skipping signal generation. "
-                "Check: are strategies active in DB? Do they have backtest "
-                "results with >= 8 trades?"
+        # 2. Hard blocks — log a single decision so the dashboard explains why
+        if ctx.session.blocked:
+            await DecisionLogger.log(
+                session=session, candidate=None, accepted=False,
+                ctx=ctx, rejection_reason=f"session_blocked:{ctx.session.label}",
             )
+            await session.commit()
+            return []
+        if ctx.news.blocked:
+            await DecisionLogger.log(
+                session=session, candidate=None, accepted=False,
+                ctx=ctx, rejection_reason=f"news_blackout:{ctx.news.reason}",
+            )
+            await session.commit()
+            return []
+        if ctx.regime in (Regime.CHOP, Regime.UNKNOWN):
+            await DecisionLogger.log(
+                session=session, candidate=None, accepted=False,
+                ctx=ctx, rejection_reason=f"regime:{ctx.regime.value}",
+            )
+            await session.commit()
             return []
 
-        regime = ranked[0].regime
-        logger.info(
-            "Signal pipeline: {} strategies qualified, regime={}",
-            len(ranked),
-            regime.value,
-        )
+        allowed = self.regime_selector.allowed(ctx.regime)
+        if not allowed:
+            return []
 
-        # 2.5. Compute macro bias once (DXY trend + VIX risk-off)
-        macro_bias: MacroBias | None = None
-        if self.macro_filter is not None:
-            macro_bias = await self.macro_filter.compute_bias(session)
-            logger.info(
-                "Macro bias: {} strength={:.1f} available={}",
-                macro_bias.direction.value,
-                macro_bias.strength,
-                macro_bias.available,
-            )
+        # 3. Try each allowed strategy
+        all_scored: list[tuple[float, object, str, StopPlan, TargetPlan, SignalScore]] = []
 
-        # 3. Try each strategy in ranked order until one produces a signal
-        validated = []
-        strategy_name = None
-        for score in ranked:
-            strategy_name = score.strategy_name
-            logger.info(
-                "Trying strategy '{}' (score={:.4f}, degraded={})",
-                strategy_name,
-                score.composite_score,
-                score.is_degraded,
-            )
+        for strategy_name in allowed:
+            kind = _KIND_BY_STRATEGY.get(strategy_name, KIND_LIQ_SWEEP)
 
-            # 3a. Generate candidates
-            candidates = await self.generator.generate(session, strategy_name)
+            try:
+                candidates = await self.generator.generate(session, strategy_name)
+            except Exception:
+                logger.exception("Pipeline: generate failed for {}", strategy_name)
+                continue
+
             if not candidates:
-                logger.info(
-                    "No candidates from '{}', trying next strategy",
-                    strategy_name,
-                )
                 continue
 
-            # 3b. Validate candidates
-            valid = await self.generator.validate(session, candidates)
+            try:
+                valid = await self.generator.validate(session, candidates)
+            except Exception:
+                logger.exception("Pipeline: validate failed for {}", strategy_name)
+                continue
+
             if not valid:
-                logger.info(
-                    "All candidates from '{}' filtered out, trying next strategy",
-                    strategy_name,
-                )
                 continue
 
-            # 3c. Pick the single best candidate (highest confidence)
-            valid.sort(key=lambda c: float(c.confidence), reverse=True)
-            best_candidate = valid[0]
-            if len(valid) > 1:
-                logger.info(
-                    "Pipeline narrowed {} candidates to best: {} {} (conf={:.1f}%)",
-                    len(valid),
-                    best_candidate.direction.value,
-                    best_candidate.entry_price,
-                    float(best_candidate.confidence),
-                )
-            validated = [best_candidate]
-
-            # 3d. Apply macro bias confidence adjustment.
-            #
-            # When MacroBiasFilter is configured and macro data is available,
-            # aligned signals receive a small confidence boost (+5) and opposed
-            # signals receive a penalty (-15). The adjustment is non-blocking:
-            # it shifts confidence but never hard-rejects a candidate. The
-            # existing risk/validation gates remain the final arbiters.
-            if self.macro_filter is not None and macro_bias is not None:
-                validated = self.macro_filter.apply(validated, macro_bias)
-                best_candidate = validated[0]
-
-            # 3e. Opposite-direction handling.
-            #
-            # Note: macro bias has already been applied to `validated` above.
-            # Historically the pipeline blocked any signal whose direction
-            # disagreed with an existing active signal. That made sense as a
-            # blunt safety rail but also meant the system couldn't fade an
-            # extended trend or take a high-conviction reversal.
-            #
-            # Now: only block if there's an active signal in the OPPOSITE
-            # direction AND the candidate's confidence falls below
-            # `hedge_min_confidence` (default 100.0 -> effectively disabled,
-            # preserving prior behaviour). Confidence at or above the
-            # threshold lets the signal through tagged as a HEDGE.
-            new_dir = validated[0].direction.value
-            opposite_dir = "SELL" if new_dir == "BUY" else "BUY"
-            opposite_count_stmt = (
-                select(func.count())
-                .select_from(Signal)
-                .where(
-                    and_(
-                        Signal.status == "active",
-                        Signal.direction == opposite_dir,
-                    )
-                )
-            )
-            opposite_count = (
-                await session.execute(opposite_count_stmt)
-            ).scalar_one()
-
-            if opposite_count > 0:
-                trade_settings = await get_trade_settings(session)
-                threshold = float(trade_settings.hedge_min_confidence)
-                candidate_conf = float(validated[0].confidence)
-                if candidate_conf < threshold:
-                    logger.info(
-                        "Blocking {} signal from '{}': "
-                        "{} active opposite-direction ({}) signal(s); "
-                        "confidence {:.1f} below hedge threshold {:.1f}",
-                        new_dir,
-                        strategy_name,
-                        opposite_count,
-                        opposite_dir,
-                        candidate_conf,
-                        threshold,
-                    )
-                    validated = []
+            for candidate in valid:
+                try:
+                    stop_plan = self.stop_engine.place(candidate, ctx, kind=kind)
+                except Exception:
+                    logger.exception("StopEngine failed for candidate")
                     continue
-                logger.info(
-                    "Allowing HEDGE {} signal from '{}' over {} active {} "
-                    "signal(s): confidence {:.1f} >= threshold {:.1f}",
-                    new_dir,
-                    strategy_name,
-                    opposite_count,
-                    opposite_dir,
-                    candidate_conf,
-                    threshold,
-                )
-                hedge_candidate = validated[0].model_copy(
+
+                if stop_plan.rejected:
+                    await DecisionLogger.log(
+                        session=session, candidate=candidate, accepted=False,
+                        ctx=ctx, rejection_reason=stop_plan.rejection_reason,
+                    )
+                    continue
+
+                try:
+                    target_plan = self.target_engine.place(candidate, stop_plan, ctx)
+                except Exception:
+                    logger.exception("TargetEngine failed for candidate")
+                    continue
+
+                # Mutate the candidate so persistence uses the engine-derived levels
+                candidate = candidate.model_copy(
                     update={
-                        "is_hedge": True,
-                        "reasoning": (
-                            validated[0].reasoning + " | " + HEDGE_REASONING_TAG
-                        ),
+                        "stop_loss": stop_plan.stop_price,
+                        "take_profit_1": target_plan.tp1,
+                        "take_profit_2": target_plan.tp2,
+                        "risk_reward": Decimal(str(target_plan.rr_tp1)),
                     }
                 )
-                validated = [hedge_candidate]
 
-            # 3f. Risk check
+                score = self.scoring.score(candidate, ctx, kind=kind)
+                if not score.passes(self.score_threshold):
+                    await DecisionLogger.log(
+                        session=session, candidate=candidate, accepted=False,
+                        ctx=ctx, score=score,
+                        score_threshold=self.score_threshold,
+                        rejection_reason=f"score_below_threshold ({score.value:.2f} < {self.score_threshold:.2f})",
+                    )
+                    continue
+
+                all_scored.append((score.value, candidate, strategy_name, stop_plan, target_plan, score))
+
+        if not all_scored:
+            return []
+
+        # 4. Pick the highest-scoring candidate across all allowed strategies
+        all_scored.sort(key=lambda t: t[0], reverse=True)
+        best_score, best_candidate, best_name, best_stop, best_target, best_score_obj = all_scored[0]
+
+        # Reject the runners-up (decision-logged so we know they existed)
+        for s, cand, sname, _stop, _tgt, scr in all_scored[1:]:
+            await DecisionLogger.log(
+                session=session, candidate=cand, accepted=False,
+                ctx=ctx, score=scr, score_threshold=self.score_threshold,
+                rejection_reason=f"runner_up_to_{best_name}",
+            )
+
+        # 5. Risk manager (existing) — final position-sizing check
+        try:
             current_atr, baseline_atr = await self._compute_atr(session)
+        except Exception:
+            current_atr, baseline_atr = 1.0, 1.0
+        try:
             risk_results = await self.risk_manager.check(
-                session, validated,
-                current_atr=current_atr,
-                baseline_atr=baseline_atr,
+                session, [best_candidate],
+                current_atr=current_atr, baseline_atr=baseline_atr,
             )
+        except Exception:
+            logger.exception("RiskManager failed; signal still persisted")
+            risk_results = []
 
-            approved_candidates = []
-            approved_sizes: dict[int, Decimal] = {}
-            for i, (candidate, risk_result) in enumerate(risk_results):
-                if risk_result.approved:
-                    approved_candidates.append(candidate)
-                    approved_sizes[len(approved_candidates) - 1] = (
-                        risk_result.position_size
-                    )
-                else:
-                    logger.info(
-                        "Candidate rejected by risk check: {}",
-                        risk_result.rejection_reason,
-                    )
-
-            if not approved_candidates:
-                logger.info(
-                    "All candidates from '{}' rejected by risk manager, trying next",
-                    strategy_name,
+        approved = True
+        approved_size: Decimal | None = None
+        for cand, rr in risk_results:
+            if not rr.approved:
+                approved = False
+                rejection = rr.rejection_reason
+                await DecisionLogger.log(
+                    session=session, candidate=best_candidate, accepted=False,
+                    ctx=ctx, score=best_score_obj,
+                    rejection_reason=f"risk_manager:{rejection}",
                 )
-                validated = []
-                continue
+                break
+            approved_size = rr.position_size
 
-            # Found a valid signal -- break out of the strategy loop
-            validated = approved_candidates
-            logger.info(
-                "Strategy '{}' produced {} approved candidate(s)",
-                strategy_name,
-                len(validated),
+        if not approved:
+            return []
+
+        # 6. Persist
+        strat_row = (
+            await session.execute(
+                select(StrategyModel).where(StrategyModel.name == best_name)
             )
-            break
-        else:
-            # Exhausted all strategies with no valid signal
-            logger.warning(
-                "All {} strategies tried, none produced valid signals. "
-                "Strategies may need looser conditions or market conditions "
-                "don't match any pattern.",
-                len(ranked),
+        ).scalar_one_or_none()
+        if strat_row is None:
+            logger.error("Strategy '{}' missing in strategies table", best_name)
+            await DecisionLogger.log(
+                session=session, candidate=best_candidate, accepted=False,
+                ctx=ctx, score=best_score_obj,
+                rejection_reason="strategy_row_missing",
             )
             return []
 
-        if not validated or strategy_name is None:
-            return []
+        expires_at = self.generator.compute_expiry(best_candidate)
+        reasoning = best_candidate.reasoning + f" | Score {best_score:.2f}/10"
+        if approved_size is not None:
+            reasoning += f" | Position size: {approved_size}"
 
-        # 4. H4 confluence boost
-        for i, candidate in enumerate(validated):
-            has_confluence = await self.selector.check_h4_confluence(
-                session, candidate.direction.value
-            )
-            if has_confluence:
-                boosted = min(float(candidate.confidence) + 5, 100.0)
-                new_confidence = Decimal(str(round(boosted, 2)))
-                new_reasoning = candidate.reasoning + " | H4 confluence confirmed"
-                validated[i] = candidate.model_copy(
-                    update={
-                        "confidence": new_confidence,
-                        "reasoning": new_reasoning,
-                    }
-                )
-                logger.info(
-                    "H4 confluence boost: {} confidence {} -> {}",
-                    candidate.direction.value,
-                    candidate.confidence,
-                    new_confidence,
-                )
-
-        # 5. DXY correlation (non-blocking, informational)
-        dxy_info = await self.gold_intel.get_dxy_correlation(session)
-
-        # 6. Gold intelligence enrichment
-        enriched = self.gold_intel.enrich(validated, dxy_info)
-
-        # 7. Persist signals
-        strat_stmt = select(StrategyModel).where(
-            StrategyModel.name == strategy_name
+        signal = Signal(
+            strategy_id=strat_row.id,
+            symbol=best_candidate.symbol,
+            timeframe=best_candidate.timeframe,
+            direction=best_candidate.direction.value,
+            entry_price=best_candidate.entry_price,
+            stop_loss=best_candidate.stop_loss,
+            take_profit_1=best_candidate.take_profit_1,
+            take_profit_2=best_candidate.take_profit_2,
+            risk_reward=best_candidate.risk_reward,
+            confidence=best_candidate.confidence,
+            reasoning=reasoning,
+            status="active",
+            expires_at=expires_at,
         )
-        strat_result = await session.execute(strat_stmt)
-        strategy_row = strat_result.scalar_one_or_none()
+        session.add(signal)
+        await session.flush()
 
-        if strategy_row is None:
-            logger.error(
-                "Strategy '{}' not found in strategies table, cannot persist signals",
-                strategy_name,
-            )
-            return []
-
-        strategy_id = strategy_row.id
-
-        persisted: list[Signal] = []
-        for i, candidate in enumerate(enriched):
-            expires_at = self.generator.compute_expiry(candidate)
-
-            position_size = approved_sizes.get(i)
-            reasoning = candidate.reasoning
-            if position_size is not None:
-                reasoning += f" | Position size: {position_size}"
-
-            signal = Signal(
-                strategy_id=strategy_id,
-                symbol=candidate.symbol,
-                timeframe=candidate.timeframe,
-                direction=candidate.direction.value,
-                entry_price=candidate.entry_price,
-                stop_loss=candidate.stop_loss,
-                take_profit_1=candidate.take_profit_1,
-                take_profit_2=candidate.take_profit_2,
-                risk_reward=candidate.risk_reward,
-                confidence=candidate.confidence,
-                reasoning=reasoning,
-                status="active",
-                expires_at=expires_at,
-            )
-            session.add(signal)
-            persisted.append(signal)
+        await DecisionLogger.log(
+            session=session, candidate=best_candidate, accepted=True,
+            ctx=ctx, score=best_score_obj,
+            score_threshold=self.score_threshold,
+            signal_id=signal.id,
+        )
 
         await session.commit()
 
         logger.info(
-            "Pipeline complete: {} signal(s) generated from '{}' (regime={})",
-            len(persisted),
-            strategy_name,
-            regime.value,
+            "Pipeline v2: persisted {} {} score={:.2f} regime={} session={}",
+            best_name, best_candidate.direction.value,
+            best_score, ctx.regime.value, ctx.session.label,
         )
-        return persisted
+        return [signal]
 
-    async def _compute_atr(
-        self, session: AsyncSession
-    ) -> tuple[float, float]:
-        """Compute current and baseline ATR(14) from H1 candle data.
-
-        Current ATR is the latest ATR(14) value. Baseline ATR is the mean
-        of the last 50 ATR values, providing a normalization reference for
-        volatility-adjusted position sizing.
-
-        Returns:
-            (current_atr, baseline_atr) -- defaults to (1.0, 1.0) if
-            insufficient data is available.
-        """
+    # ------------------------------------------------------------------
+    async def _compute_atr(self, session: AsyncSession) -> tuple[float, float]:
+        """Same computation as old pipeline; kept here for RiskManager input."""
         import pandas as pd
+        from sqlalchemy import and_
+        from app.config import get_settings
+        from app.models.candle import Candle
+        from app.strategies.helpers.indicators import compute_atr
 
-        # Need at least 14 + 50 bars for a meaningful baseline
         stmt = (
             select(Candle.high, Candle.low, Candle.close)
             .where(
@@ -400,37 +315,14 @@ class SignalPipeline:
             .order_by(Candle.timestamp.desc())
             .limit(100)
         )
-        result = await session.execute(stmt)
-        rows = result.all()
-
-        if len(rows) < 20:  # Need ATR(14) + a few bars minimum
-            logger.debug(
-                "Insufficient H1 candles ({}) for ATR, using defaults",
-                len(rows),
-            )
-            return (1.0, 1.0)
-
-        # Rows are desc; reverse to chronological order
+        rows = (await session.execute(stmt)).all()
+        if len(rows) < 20:
+            return 1.0, 1.0
         rows = list(reversed(rows))
         highs = pd.Series([float(r[0]) for r in rows])
         lows = pd.Series([float(r[1]) for r in rows])
         closes = pd.Series([float(r[2]) for r in rows])
-
-        atr_series = compute_atr(highs, lows, closes, length=14)
-        atr_valid = atr_series.dropna()
-
-        if atr_valid.empty:
-            return (1.0, 1.0)
-
-        current_atr = float(atr_valid.iloc[-1])
-        baseline_atr = float(atr_valid.mean())
-
-        if current_atr <= 0 or baseline_atr <= 0:
-            return (1.0, 1.0)
-
-        logger.debug(
-            "ATR computed: current={:.4f}, baseline={:.4f}",
-            current_atr,
-            baseline_atr,
-        )
-        return (current_atr, baseline_atr)
+        atr_series = compute_atr(highs, lows, closes, length=14).dropna()
+        if atr_series.empty:
+            return 1.0, 1.0
+        return float(atr_series.iloc[-1]), float(atr_series.mean())

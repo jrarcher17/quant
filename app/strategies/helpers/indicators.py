@@ -84,3 +84,65 @@ def compute_rsi(series: pd.Series, length: int = 14) -> pd.Series:
         RSI series of the same length as input (leading NaNs for warmup).
     """
     return ta.rsi(series, length=length)
+
+
+def compute_adx(
+    high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14
+) -> pd.Series:
+    """Compute Average Directional Index (ADX) — trend strength 0-100.
+
+    Returns the ADX line only. >25 typically indicates a trending market;
+    <20 indicates a ranging market.
+    """
+    result = ta.adx(high=high, low=low, close=close, length=length)
+    if result is None:
+        return pd.Series([float("nan")] * len(close), index=close.index)
+    col = f"ADX_{length}"
+    if col in result.columns:
+        return result[col]
+    # pandas-ta-classic occasionally renames columns
+    for c in result.columns:
+        if c.startswith("ADX"):
+            return result[c]
+    return pd.Series([float("nan")] * len(close), index=close.index)
+
+
+def atr_percentile_rank(atr_series: pd.Series, lookback: int = 200) -> float:
+    """Return where the latest ATR sits within the rolling lookback window.
+
+    Returns a float in [0.0, 1.0]. 0.5 means the latest ATR is exactly the
+    median of the lookback window; 0.9 means it's higher than 90% of recent
+    ATRs.
+    """
+    valid = atr_series.dropna()
+    if len(valid) < 10:
+        return 0.5
+    window = valid.tail(lookback)
+    latest = float(window.iloc[-1])
+    rank = (window < latest).sum() / len(window)
+    return float(rank)
+
+
+def candle_body_overlap_ratio(c1_high: float, c1_low: float, c2_high: float, c2_low: float) -> float:
+    """Compute how much two candles' ranges overlap on a 0..1 scale.
+
+    1.0 means they fully overlap (chop); 0.0 means no overlap (clean break).
+    """
+    overlap = max(0.0, min(c1_high, c2_high) - max(c1_low, c2_low))
+    union = max(c1_high, c2_high) - min(c1_low, c2_low)
+    if union <= 0:
+        return 0.0
+    return float(overlap / union)
+
+
+def avg_overlap_last_n(highs: pd.Series, lows: pd.Series, n: int = 10) -> float:
+    """Average body overlap ratio over the last n candle pairs."""
+    if len(highs) < n + 1:
+        return 0.0
+    h = highs.iloc[-(n + 1):].to_list()
+    l = lows.iloc[-(n + 1):].to_list()
+    pairs = [
+        candle_body_overlap_ratio(h[i], l[i], h[i - 1], l[i - 1])
+        for i in range(1, len(h))
+    ]
+    return float(sum(pairs) / len(pairs)) if pairs else 0.0
