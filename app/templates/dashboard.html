@@ -960,7 +960,15 @@
                 <div class="ctx-summary" id="v2-ctx-summary">Building market picture…</div>
 
                 <div style="margin-top:14px;">
-                    <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;letter-spacing:1px;text-transform:uppercase;">Recent decisions (last 10)</div>
+                    <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px;">
+                        <div style="font-size:11px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase;">Recent decisions</div>
+                        <div style="font-size:10.5px;color:var(--text-dim);">
+                            <span style="display:inline-block;width:8px;height:8px;background:#9ca3af;border-radius:50%;margin-right:4px;"></span>
+                            Pipeline gate (whole engine paused) ·
+                            <span style="display:inline-block;width:8px;height:8px;background:var(--accent);border-radius:50%;margin:0 4px;"></span>
+                            Per-strategy evaluation
+                        </div>
+                    </div>
                     <table class="table" id="v2-decisions" style="font-size:11px;">
                         <thead><tr><th>Time</th><th>Strategy</th><th>Dir</th><th>Score</th><th>Regime</th><th>Status</th><th>Reason</th></tr></thead>
                         <tbody id="v2-decisions-body"></tbody>
@@ -2150,14 +2158,50 @@ async function refreshEngineV2() {
             const decisions = await decResp.json();
             const body = document.getElementById('v2-decisions-body');
             const empty = document.getElementById('v2-decisions-empty');
-            if (Array.isArray(decisions) && decisions.length) {
+
+            // Decisions arrive newest-first. Collapse consecutive identical
+            // pipeline-gate rows (same reason) into a single row with a count.
+            const collapsed = [];
+            const isGate = (d) => d.strategy === '(pipeline gate)';
+            const reasonKey = (d) => `${d.rejection_reason || ''}`;
+            for (const d of decisions) {
+                const last = collapsed[collapsed.length - 1];
+                if (last && isGate(last) && isGate(d) && reasonKey(last) === reasonKey(d)) {
+                    last._count = (last._count || 1) + 1;
+                    last._lastTime = d.created_at;
+                    continue;
+                }
+                collapsed.push({ ...d, _count: 1 });
+            }
+
+            if (collapsed.length) {
                 empty.style.display = 'none';
-                body.innerHTML = decisions.map(d => {
-                    const status = d.accepted ? '<span style="color:#10b981;">PASS</span>' : '<span style="color:#ef4444;">REJECT</span>';
+                body.innerHTML = collapsed.map(d => {
+                    const gate = isGate(d);
+                    const status = d.accepted
+                        ? '<span style="color:#10b981;">PASS</span>'
+                        : (gate
+                            ? '<span style="color:#9ca3af;">GATE</span>'
+                            : '<span style="color:#ef4444;">REJECT</span>');
                     const reason = d.accepted ? '-' : (d.rejection_reason || '-');
                     const score = (d.score !== null && d.score !== undefined) ? d.score.toFixed(2) : '-';
                     const t = new Date(d.created_at).toLocaleTimeString();
-                    return `<tr><td>${t}</td><td>${d.strategy}</td><td>${d.direction || '-'}</td><td>${score}</td><td>${d.regime || '-'}</td><td>${status}</td><td style="font-size:10px;color:var(--text-dim);">${reason}</td></tr>`;
+                    const countBadge = d._count > 1
+                        ? ` <span style="font-size:9px;background:rgba(255,255,255,0.08);padding:1px 5px;border-radius:8px;color:var(--text-dim);">×${d._count}</span>`
+                        : '';
+                    const stratLabel = gate
+                        ? `<span style="color:var(--text-dim);font-style:italic;">${d.strategy}${countBadge}</span>`
+                        : `${d.strategy}${countBadge}`;
+                    const rowTint = gate ? 'background:rgba(255,255,255,0.015);' : '';
+                    return `<tr style="${rowTint}">`
+                        + `<td>${t}</td>`
+                        + `<td>${stratLabel}</td>`
+                        + `<td>${d.direction || '-'}</td>`
+                        + `<td>${score}</td>`
+                        + `<td>${d.regime || '-'}</td>`
+                        + `<td>${status}</td>`
+                        + `<td style="font-size:10px;color:var(--text-dim);">${reason}</td>`
+                        + `</tr>`;
                 }).join('');
             } else {
                 empty.style.display = '';

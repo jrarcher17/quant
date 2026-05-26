@@ -34,8 +34,11 @@ class DecisionLogger:
         signal_id: int | None = None,
     ) -> None:
         try:
+            # When candidate is None we're a pipeline-level gate (session /
+            # news / regime). Tag it explicitly so the dashboard can group
+            # those rows separately from per-strategy decisions.
             strategy_name = (
-                getattr(candidate, "strategy_name", None) or "unknown"
+                getattr(candidate, "strategy_name", None) or "(pipeline gate)"
             )
             direction = None
             entry_price = None
