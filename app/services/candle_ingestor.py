@@ -12,8 +12,9 @@ from loguru import logger
 from sqlalchemy import func, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 from twelvedata import TDClient
+from twelvedata.exceptions import BadRequestError as TDBadRequestError
 
 from app.market import to_twelve_data_symbol
 from app.models.candle import Candle
@@ -51,7 +52,16 @@ class CandleIngestor:
     def __init__(self, api_key: str) -> None:
         self.client = TDClient(apikey=api_key)
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=30))
+    # Only retry on transient connection / server errors.
+    # BadRequestError ("No data available") is NOT transient — the candle for a
+    # freshly-opened bar hasn't been published yet. Retrying wastes API quota
+    # and blocks the asyncio event loop (this is a sync method) for 6+ seconds.
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, max=30),
+        retry=retry_if_exception_type((ConnectionError, TimeoutError, RuntimeError)),
+        reraise=True,
+    )
     def _fetch_from_api(
         self,
         symbol: str,
@@ -75,8 +85,18 @@ class CandleIngestor:
         if start_date is not None:
             params["start_date"] = start_date
 
-        ts = self.client.time_series(**params)
-        data = ts.as_json()
+        try:
+            ts = self.client.time_series(**params)
+            data = ts.as_json()
+        except TDBadRequestError as exc:
+            # "No data is available on the specified dates" — the candle for a
+            # brand-new bar hasn't been published to Twelve Data yet (~60–90 s
+            # after the bar opens). This is normal; skip silently.
+            logger.debug(
+                "Twelve Data: no data for {} {} start={} (candle not yet published): {}",
+                symbol, interval, start_date, exc,
+            )
+            return []
 
         # Twelve Data returns a dict with "code"/"message" on errors
         if isinstance(data, dict) and "code" in data:
