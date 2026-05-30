@@ -185,7 +185,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Start background scheduler and register candle refresh jobs
     scheduler.start()
     register_jobs()
-    logger.info("ApexQ application started")
+    logger.info(
+        "ApexQ application started | scheduler_profile={}",
+        settings.scheduler_profile,
+    )
 
     yield
 

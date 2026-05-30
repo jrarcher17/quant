@@ -99,19 +99,23 @@ async def refresh_candles(timeframe: str) -> None:
         async with async_session_factory() as session:
             count = await ingestor.fetch_and_store(session, symbol, timeframe)
 
-            # Check for gaps in the last 7 days
-            now = datetime.now(timezone.utc)
-            seven_days_ago = now - timedelta(days=7)
-            gaps = await ingestor.detect_gaps(
-                session, symbol, timeframe, start=seven_days_ago, end=now
-            )
+            # Gap scan is expensive on M15 (hundreds of weekend holes every
+            # 15 min). Only run on H1+ where missing bars actually matter.
+            gap_count = 0
+            if timeframe != "M15":
+                now = datetime.now(timezone.utc)
+                seven_days_ago = now - timedelta(days=7)
+                gaps = await ingestor.detect_gaps(
+                    session, symbol, timeframe, start=seven_days_ago, end=now
+                )
+                gap_count = len(gaps)
 
             logger.info(
                 "refresh_candles complete | timeframe={timeframe} "
                 "candles_stored={count} gaps_found={gaps}",
                 timeframe=timeframe,
                 count=count,
-                gaps=len(gaps),
+                gaps=gap_count,
             )
 
         FailureTracker.record_success(job_id)
@@ -166,187 +170,187 @@ async def run_daily_backtests() -> None:
         wf_validator = WalkForwardValidator(runner=runner)
 
         async with async_session_factory() as session:
-            # Query last 90 days of H1 candles (enough for 60d window + buffer)
-            from datetime import timezone as tz
-            symbol = get_settings().trading_symbol
-            cutoff = datetime.now(tz.utc) - timedelta(days=90)
-            stmt = (
-                select(Candle)
-                .where(
-                    Candle.symbol == symbol,
-                    Candle.timeframe == "H1",
-                    Candle.timestamp >= cutoff,
-                )
-                .order_by(Candle.timestamp.asc())
-            )
-            result = await session.execute(stmt)
-            candle_rows = result.scalars().all()
-
-            if not candle_rows:
-                logger.warning("run_daily_backtests: no H1 {} candles found, skipping", symbol)
-                return
-
-            df = candles_to_dataframe(candle_rows)
-
-            # Minimum candle count: 7 days * 24 H1 bars + 72 forward bars
-            min_candles = 7 * 24 + 72
-            if len(df) < min_candles:
-                logger.warning(
-                    f"run_daily_backtests: insufficient candles "
-                    f"(have {len(df)}, need {min_candles}), skipping"
-                )
-                return
-
-            # Build strategy_name -> strategy_id lookup from DB
-            strat_stmt = select(StrategyModel)
-            strat_result = await session.execute(strat_stmt)
-            db_strategies = {s.name: s.id for s in strat_result.scalars().all()}
-
-            registry = BaseStrategy.get_registry()
-            total_results = 0
-            total_wf_results = 0
-
-            # Load optimized params for each strategy
-            from app.models.optimized_params import OptimizedParams
-            from sqlalchemy import and_
-            opt_params_lookup: dict[str, dict[str, float]] = {}
-            for sname in registry:
-                opt_stmt = (
-                    select(OptimizedParams.params)
+            try:
+                # Query last 90 days of H1 candles (enough for 60d window + buffer)
+                from datetime import timezone as tz
+                symbol = get_settings().trading_symbol
+                cutoff = datetime.now(tz.utc) - timedelta(days=90)
+                stmt = (
+                    select(Candle)
                     .where(
-                        and_(
-                            OptimizedParams.strategy_name == sname,
-                            OptimizedParams.is_active.is_(True),
-                            OptimizedParams.is_overfitted.isnot(True),
-                        )
+                        Candle.symbol == symbol,
+                        Candle.timeframe == "H1",
+                        Candle.timestamp >= cutoff,
                     )
-                    .order_by(OptimizedParams.created_at.desc())
-                    .limit(1)
+                    .order_by(Candle.timestamp.asc())
                 )
-                opt_result = await session.execute(opt_stmt)
-                opt_row = opt_result.scalar_one_or_none()
-                if opt_row:
-                    opt_params_lookup[sname] = opt_row
+                result = await session.execute(stmt)
+                candle_rows = result.scalars().all()
 
-            for strategy_name, strategy_cls in registry.items():
-                opt_params = opt_params_lookup.get(strategy_name)
-                strategy = strategy_cls(params=opt_params)
-                strategy_id = db_strategies.get(strategy_name)
-
-                if strategy_id is None:
+                if not candle_rows:
                     logger.warning(
-                        f"run_daily_backtests: strategy '{strategy_name}' "
-                        f"not found in strategies table, skipping"
+                        "run_daily_backtests: no H1 {} candles found, skipping", symbol
                     )
-                    continue
+                    return
 
-                # Run standard backtests on 7, 14, 30, and 60-day windows
-                for window_days in [7, 14, 30, 60]:
-                    try:
-                        metrics, trades = runner.run_full_backtest(
-                            strategy, df, window_days
-                        )
+                df = candles_to_dataframe(candle_rows)
 
-                        if metrics.total_trades == 0:
-                            logger.info(
-                                f"run_daily_backtests: 0 trades for "
-                                f"'{strategy_name}' window={window_days}d, skipping persist"
+                min_candles = 7 * 24 + 72
+                if len(df) < min_candles:
+                    logger.warning(
+                        f"run_daily_backtests: insufficient candles "
+                        f"(have {len(df)}, need {min_candles}), skipping"
+                    )
+                    return
+
+                strat_stmt = select(StrategyModel)
+                strat_result = await session.execute(strat_stmt)
+                db_strategies = {s.name: s.id for s in strat_result.scalars().all()}
+
+                registry = BaseStrategy.get_registry()
+                total_results = 0
+                total_wf_results = 0
+
+                from app.models.optimized_params import OptimizedParams
+                from sqlalchemy import and_
+                opt_params_lookup: dict[str, dict[str, float]] = {}
+                for sname in registry:
+                    opt_stmt = (
+                        select(OptimizedParams.params)
+                        .where(
+                            and_(
+                                OptimizedParams.strategy_name == sname,
+                                OptimizedParams.is_active.is_(True),
+                                OptimizedParams.is_overfitted.isnot(True),
                             )
-                            continue
-
-                        # Determine date range from candle data
-                        start_date = df["timestamp"].iloc[0]
-                        end_date = df["timestamp"].iloc[-1]
-
-                        backtest_result = BacktestResult(
-                            strategy_id=strategy_id,
-                            symbol=symbol,
-                            timeframe="H1",
-                            window_days=window_days,
-                            start_date=start_date,
-                            end_date=end_date,
-                            win_rate=metrics.win_rate,
-                            profit_factor=metrics.profit_factor,
-                            sharpe_ratio=metrics.sharpe_ratio,
-                            max_drawdown=metrics.max_drawdown,
-                            expectancy=metrics.expectancy,
-                            total_trades=metrics.total_trades,
-                            is_walk_forward=False,
-                            is_overfitted=None,
-                            walk_forward_efficiency=None,
-                            spread_model="session_aware",
                         )
-                        session.add(backtest_result)
-                        total_results += 1
+                        .order_by(OptimizedParams.created_at.desc())
+                        .limit(1)
+                    )
+                    opt_result = await session.execute(opt_stmt)
+                    opt_row = opt_result.scalar_one_or_none()
+                    if opt_row:
+                        opt_params_lookup[sname] = opt_row
+
+                for strategy_name, strategy_cls in registry.items():
+                    opt_params = opt_params_lookup.get(strategy_name)
+                    strategy = strategy_cls(params=opt_params)
+                    strategy_id = db_strategies.get(strategy_name)
+
+                    if strategy_id is None:
+                        logger.warning(
+                            f"run_daily_backtests: strategy '{strategy_name}' "
+                            f"not found in strategies table, skipping"
+                        )
+                        continue
+
+                    for window_days in [7, 14, 30, 60]:
+                        try:
+                            metrics, trades = runner.run_full_backtest(
+                                strategy, df, window_days
+                            )
+
+                            if metrics.total_trades == 0:
+                                logger.info(
+                                    f"run_daily_backtests: 0 trades for "
+                                    f"'{strategy_name}' window={window_days}d, skipping persist"
+                                )
+                                continue
+
+                            start_date = df["timestamp"].iloc[0]
+                            end_date = df["timestamp"].iloc[-1]
+
+                            backtest_result = BacktestResult(
+                                strategy_id=strategy_id,
+                                symbol=symbol,
+                                timeframe="H1",
+                                window_days=window_days,
+                                start_date=start_date,
+                                end_date=end_date,
+                                win_rate=metrics.win_rate,
+                                profit_factor=metrics.profit_factor,
+                                sharpe_ratio=metrics.sharpe_ratio,
+                                max_drawdown=metrics.max_drawdown,
+                                expectancy=metrics.expectancy,
+                                total_trades=metrics.total_trades,
+                                is_walk_forward=False,
+                                is_overfitted=None,
+                                walk_forward_efficiency=None,
+                                spread_model="session_aware",
+                            )
+                            session.add(backtest_result)
+                            total_results += 1
+
+                        except Exception:
+                            await _rollback_session(session)
+                            logger.exception(
+                                f"run_daily_backtests: error running backtest for "
+                                f"'{strategy_name}' window={window_days}d"
+                            )
+
+                    try:
+                        wf_result = wf_validator.validate(strategy, df, window_days=30)
+
+                        if wf_result.oos_metrics.total_trades == 0:
+                            logger.info(
+                                f"run_daily_backtests: 0 OOS trades for "
+                                f"'{strategy_name}' walk-forward, skipping persist"
+                            )
+                        else:
+                            wfe_values = [
+                                v for v in [wf_result.wfe_win_rate, wf_result.wfe_profit_factor]
+                                if v is not None
+                            ]
+                            avg_wfe = (
+                                Decimal(str(round(sum(wfe_values) / len(wfe_values), 4)))
+                                if wfe_values
+                                else None
+                            )
+
+                            start_date = df["timestamp"].iloc[0]
+                            end_date = df["timestamp"].iloc[-1]
+
+                            wf_backtest_result = BacktestResult(
+                                strategy_id=strategy_id,
+                                symbol=symbol,
+                                timeframe="H1",
+                                window_days=30,
+                                start_date=start_date,
+                                end_date=end_date,
+                                win_rate=wf_result.oos_metrics.win_rate,
+                                profit_factor=wf_result.oos_metrics.profit_factor,
+                                sharpe_ratio=wf_result.oos_metrics.sharpe_ratio,
+                                max_drawdown=wf_result.oos_metrics.max_drawdown,
+                                expectancy=wf_result.oos_metrics.expectancy,
+                                total_trades=wf_result.oos_metrics.total_trades,
+                                is_walk_forward=True,
+                                is_overfitted=wf_result.is_overfitted,
+                                walk_forward_efficiency=avg_wfe,
+                                spread_model="session_aware",
+                            )
+                            session.add(wf_backtest_result)
+                            total_wf_results += 1
 
                     except Exception:
+                        await _rollback_session(session)
                         logger.exception(
-                            f"run_daily_backtests: error running backtest for "
-                            f"'{strategy_name}' window={window_days}d"
+                            f"run_daily_backtests: error in walk-forward validation "
+                            f"for '{strategy_name}'"
                         )
 
-                # Run walk-forward validation
-                try:
-                    wf_result = wf_validator.validate(strategy, df, window_days=30)
+                    gc.collect()
 
-                    if wf_result.oos_metrics.total_trades == 0:
-                        logger.info(
-                            f"run_daily_backtests: 0 OOS trades for "
-                            f"'{strategy_name}' walk-forward, skipping persist"
-                        )
-                    else:
-                        # Compute average WFE for persistence
-                        wfe_values = [
-                            v for v in [wf_result.wfe_win_rate, wf_result.wfe_profit_factor]
-                            if v is not None
-                        ]
-                        avg_wfe = (
-                            Decimal(str(round(sum(wfe_values) / len(wfe_values), 4)))
-                            if wfe_values
-                            else None
-                        )
+                await session.commit()
 
-                        start_date = df["timestamp"].iloc[0]
-                        end_date = df["timestamp"].iloc[-1]
-
-                        wf_backtest_result = BacktestResult(
-                            strategy_id=strategy_id,
-                            symbol=symbol,
-                            timeframe="H1",
-                            window_days=30,
-                            start_date=start_date,
-                            end_date=end_date,
-                            win_rate=wf_result.oos_metrics.win_rate,
-                            profit_factor=wf_result.oos_metrics.profit_factor,
-                            sharpe_ratio=wf_result.oos_metrics.sharpe_ratio,
-                            max_drawdown=wf_result.oos_metrics.max_drawdown,
-                            expectancy=wf_result.oos_metrics.expectancy,
-                            total_trades=wf_result.oos_metrics.total_trades,
-                            is_walk_forward=True,
-                            is_overfitted=wf_result.is_overfitted,
-                            walk_forward_efficiency=avg_wfe,
-                            spread_model="session_aware",
-                        )
-                        session.add(wf_backtest_result)
-                        total_wf_results += 1
-
-                except Exception:
-                    logger.exception(
-                        f"run_daily_backtests: error in walk-forward validation "
-                        f"for '{strategy_name}'"
-                    )
-
-                # Free memory between strategies
-                gc.collect()
-
-            await session.commit()
-
-            logger.info(
-                f"run_daily_backtests complete | "
-                f"strategies={len(registry)} | "
-                f"backtest_results={total_results} | "
-                f"walk_forward_results={total_wf_results}"
-            )
+                logger.info(
+                    f"run_daily_backtests complete | "
+                    f"strategies={len(registry)} | "
+                    f"backtest_results={total_results} | "
+                    f"walk_forward_results={total_wf_results}"
+                )
+            except Exception:
+                await _rollback_session(session)
+                raise
 
     except Exception:
         logger.exception("run_daily_backtests failed")
@@ -707,6 +711,14 @@ async def send_health_digest() -> None:
             )
 
 
+async def _rollback_session(session) -> None:
+    """Clear a failed transaction so the session can run more SQL."""
+    try:
+        await session.rollback()
+    except Exception:
+        logger.debug("session rollback skipped (session may already be clean)")
+
+
 async def run_param_optimization() -> None:
     """Run parameter optimization for all registered strategies.
 
@@ -730,142 +742,148 @@ async def run_param_optimization() -> None:
         optimizer = ParamOptimizer()
 
         async with async_session_factory() as session:
-            # Load last 90 days of H1 candles (enough for optimization)
-            from datetime import datetime, timedelta, timezone as tz
-            symbol = get_settings().trading_symbol
-            cutoff = datetime.now(tz.utc) - timedelta(days=90)
-            stmt = (
-                select(Candle)
-                .where(
-                    Candle.symbol == symbol,
-                    Candle.timeframe == "H1",
-                    Candle.timestamp >= cutoff,
-                )
-                .order_by(Candle.timestamp.asc())
-            )
-            result = await session.execute(stmt)
-            candle_rows = result.scalars().all()
-
-            if not candle_rows:
-                logger.warning("run_param_optimization: no H1 {} candles, skipping", symbol)
-                return
-
-            df = candles_to_dataframe(candle_rows)
-
-            # Need enough data for 30-day backtest + walk-forward
-            min_candles = 30 * 24 + 72
-            if len(df) < min_candles:
-                logger.warning(
-                    "run_param_optimization: insufficient candles "
-                    f"(have {len(df)}, need {min_candles}), skipping"
-                )
-                return
-
-            # Build strategy_name -> strategy_id lookup
-            strat_stmt = select(StrategyModel)
-            strat_result = await session.execute(strat_stmt)
-            db_strategies = {s.name: s.id for s in strat_result.scalars().all()}
-
-            settings = get_settings()
-            notifier = _telegram_notifier(settings)
-
-            import gc
-            optimized_count = 0
-
-            for strategy_name in PARAM_RANGES:
-                strategy_id = db_strategies.get(strategy_name)
-                if strategy_id is None:
-                    logger.warning(
-                        "run_param_optimization: strategy '{}' not in DB, skipping",
-                        strategy_name,
+            try:
+                # Load last 90 days of H1 candles (enough for optimization)
+                from datetime import datetime, timedelta, timezone as tz
+                symbol = get_settings().trading_symbol
+                cutoff = datetime.now(tz.utc) - timedelta(days=90)
+                stmt = (
+                    select(Candle)
+                    .where(
+                        Candle.symbol == symbol,
+                        Candle.timeframe == "H1",
+                        Candle.timestamp >= cutoff,
                     )
-                    continue
+                    .order_by(Candle.timestamp.asc())
+                )
+                result = await session.execute(stmt)
+                candle_rows = result.scalars().all()
 
-                try:
-                    opt_result = await optimizer.optimize_strategy(strategy_name, df)
+                if not candle_rows:
+                    logger.warning(
+                        "run_param_optimization: no H1 {} candles, skipping", symbol
+                    )
+                    return
 
-                    if opt_result is None:
-                        logger.info(
-                            "run_param_optimization: no viable params for '{}'",
+                df = candles_to_dataframe(candle_rows)
+
+                min_candles = 30 * 24 + 72
+                if len(df) < min_candles:
+                    logger.warning(
+                        "run_param_optimization: insufficient candles "
+                        f"(have {len(df)}, need {min_candles}), skipping"
+                    )
+                    return
+
+                strat_stmt = select(StrategyModel)
+                strat_result = await session.execute(strat_stmt)
+                db_strategies = {s.name: s.id for s in strat_result.scalars().all()}
+
+                settings = get_settings()
+                notifier = _telegram_notifier(settings)
+
+                import gc
+                optimized_count = 0
+
+                for strategy_name in PARAM_RANGES:
+                    strategy_id = db_strategies.get(strategy_name)
+                    if strategy_id is None:
+                        logger.warning(
+                            "run_param_optimization: strategy '{}' not in DB, skipping",
                             strategy_name,
                         )
                         continue
 
-                    # Deactivate previous active params for this strategy
-                    from sqlalchemy import update, and_
-                    deactivate_stmt = (
-                        update(OptimizedParams)
-                        .where(
-                            and_(
-                                OptimizedParams.strategy_name == strategy_name,
-                                OptimizedParams.is_active.is_(True),
-                            )
+                    try:
+                        opt_result = await optimizer.optimize_strategy(
+                            strategy_name, df
                         )
-                        .values(is_active=False)
-                    )
-                    await session.execute(deactivate_stmt)
 
-                    # Persist new optimized params
-                    opt_row = OptimizedParams(
-                        strategy_id=strategy_id,
-                        strategy_name=strategy_name,
-                        params=opt_result.best_params,
-                        win_rate=opt_result.metrics.win_rate,
-                        profit_factor=opt_result.metrics.profit_factor,
-                        sharpe_ratio=opt_result.metrics.sharpe_ratio,
-                        expectancy=opt_result.metrics.expectancy,
-                        total_trades=opt_result.metrics.total_trades,
-                        wfe_ratio=(
-                            Decimal(str(round(opt_result.wfe_ratio, 4)))
-                            if opt_result.wfe_ratio is not None
-                            else None
-                        ),
-                        is_overfitted=opt_result.is_overfitted,
-                        is_active=not opt_result.is_overfitted,
-                        combinations_tested=opt_result.combinations_tested,
-                    )
-                    session.add(opt_row)
-                    optimized_count += 1
-
-                    # Send Telegram notification
-                    if notifier.enabled:
-                        # Build param summary (only optimized params)
-                        opt_params_summary = {
-                            k: v
-                            for k, v in opt_result.best_params.items()
-                            if k in PARAM_RANGES.get(strategy_name, {})
-                        }
-                        text = (
-                            f"\U0001f527 <b>Params Optimized: {strategy_name}</b>\n\n"
-                            f"<b>Params:</b> {opt_params_summary}\n"
-                            f"<b>Win Rate:</b> {opt_result.metrics.win_rate}\n"
-                            f"<b>Profit Factor:</b> {opt_result.metrics.profit_factor}\n"
-                            f"<b>Trades:</b> {opt_result.metrics.total_trades}\n"
-                            f"<b>Overfitted:</b> {opt_result.is_overfitted}\n"
-                            f"<b>Combinations:</b> {opt_result.combinations_tested}"
-                        )
-                        try:
-                            await notifier._send_message(text)
-                        except Exception:
-                            logger.exception(
-                                "Telegram notification failed for param optimization"
+                        if opt_result is None:
+                            logger.info(
+                                "run_param_optimization: no viable params for '{}'",
+                                strategy_name,
                             )
+                            continue
 
-                except Exception:
-                    logger.exception(
-                        "run_param_optimization: error optimizing '{}'",
-                        strategy_name,
-                    )
+                        # Per-strategy savepoint: a DB error on one strategy must
+                        # not poison the session for the rest (PendingRollbackError).
+                        from sqlalchemy import update, and_
 
-                # Free memory between strategy optimizations
-                gc.collect()
+                        deactivate_stmt = (
+                            update(OptimizedParams)
+                            .where(
+                                and_(
+                                    OptimizedParams.strategy_name == strategy_name,
+                                    OptimizedParams.is_active.is_(True),
+                                )
+                            )
+                            .values(is_active=False)
+                        )
+                        async with session.begin_nested():
+                            await session.execute(deactivate_stmt)
+                            session.add(
+                                OptimizedParams(
+                                    strategy_id=strategy_id,
+                                    strategy_name=strategy_name,
+                                    params=opt_result.best_params,
+                                    win_rate=opt_result.metrics.win_rate,
+                                    profit_factor=opt_result.metrics.profit_factor,
+                                    sharpe_ratio=opt_result.metrics.sharpe_ratio,
+                                    expectancy=opt_result.metrics.expectancy,
+                                    total_trades=opt_result.metrics.total_trades,
+                                    wfe_ratio=(
+                                        Decimal(str(round(opt_result.wfe_ratio, 4)))
+                                        if opt_result.wfe_ratio is not None
+                                        else None
+                                    ),
+                                    is_overfitted=opt_result.is_overfitted,
+                                    is_active=not opt_result.is_overfitted,
+                                    combinations_tested=opt_result.combinations_tested,
+                                )
+                            )
+                        optimized_count += 1
 
-            await session.commit()
+                        if notifier.enabled:
+                            opt_params_summary = {
+                                k: v
+                                for k, v in opt_result.best_params.items()
+                                if k in PARAM_RANGES.get(strategy_name, {})
+                            }
+                            text = (
+                                f"\U0001f527 <b>Params Optimized: {strategy_name}</b>\n\n"
+                                f"<b>Params:</b> {opt_params_summary}\n"
+                                f"<b>Win Rate:</b> {opt_result.metrics.win_rate}\n"
+                                f"<b>Profit Factor:</b> {opt_result.metrics.profit_factor}\n"
+                                f"<b>Trades:</b> {opt_result.metrics.total_trades}\n"
+                                f"<b>Overfitted:</b> {opt_result.is_overfitted}\n"
+                                f"<b>Combinations:</b> {opt_result.combinations_tested}"
+                            )
+                            try:
+                                await notifier._send_message(text)
+                            except Exception:
+                                logger.exception(
+                                    "Telegram notification failed for param optimization"
+                                )
 
-            logger.info(
-                "run_param_optimization complete | optimized={}",
-                optimized_count,
-            )
+                    except Exception:
+                        await _rollback_session(session)
+                        logger.exception(
+                            "run_param_optimization: error optimizing '{}'",
+                            strategy_name,
+                        )
+
+                    gc.collect()
+
+                await session.commit()
+
+                logger.info(
+                    "run_param_optimization complete | optimized={}",
+                    optimized_count,
+                )
+            except Exception:
+                await _rollback_session(session)
+                raise
 
         FailureTracker.record_success("run_param_optimization")
 

@@ -11,6 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
 
+from app.config import get_settings
 from app.workers.jobs import (
     check_outcomes,
     check_paper_trades,
@@ -99,14 +100,31 @@ def register_jobs() -> None:
     )
     logger.info("Registered job: refresh_macro_symbols (daily at 00:05 UTC)")
 
-    scheduler.add_job(
-        run_daily_backtests,
-        trigger=CronTrigger(hour="1,5,9,13,17,21", minute=0, timezone="UTC"),
-        id="run_daily_backtests",
-        name="Run backtests (4h)",
-        replace_existing=True,
-    )
-    logger.info("Registered job: run_daily_backtests (every 4h at 01,05,09,13,17,21 UTC)")
+    settings = get_settings()
+    light = settings.scheduler_profile.strip().lower() == "light"
+
+    if light:
+        scheduler.add_job(
+            run_daily_backtests,
+            trigger=CronTrigger(hour=2, minute=0, timezone="UTC"),
+            id="run_daily_backtests",
+            name="Run backtests (daily)",
+            replace_existing=True,
+        )
+        logger.info(
+            "Registered job: run_daily_backtests (daily 02:00 UTC, light profile)"
+        )
+    else:
+        scheduler.add_job(
+            run_daily_backtests,
+            trigger=CronTrigger(hour="1,5,9,13,17,21", minute=0, timezone="UTC"),
+            id="run_daily_backtests",
+            name="Run backtests (4h)",
+            replace_existing=True,
+        )
+        logger.info(
+            "Registered job: run_daily_backtests (every 4h at 01,05,09,13,17,21 UTC)"
+        )
 
     scheduler.add_job(
         run_signal_scanner,
@@ -117,14 +135,28 @@ def register_jobs() -> None:
     )
     logger.info("Registered job: run_signal_scanner (every 30min at :02, :32 UTC)")
 
-    scheduler.add_job(
-        run_param_optimization,
-        trigger=CronTrigger(hour="3,9,15,21", minute=30, timezone="UTC"),
-        id="run_param_optimization",
-        name="Run param optimization (6h)",
-        replace_existing=True,
-    )
-    logger.info("Registered job: run_param_optimization (every 6h at 03,09,15,21 UTC)")
+    if light:
+        scheduler.add_job(
+            run_param_optimization,
+            trigger=CronTrigger(hour=3, minute=30, timezone="UTC"),
+            id="run_param_optimization",
+            name="Run param optimization (daily)",
+            replace_existing=True,
+        )
+        logger.info(
+            "Registered job: run_param_optimization (daily 03:30 UTC, light profile)"
+        )
+    else:
+        scheduler.add_job(
+            run_param_optimization,
+            trigger=CronTrigger(hour="3,9,15,21", minute=30, timezone="UTC"),
+            id="run_param_optimization",
+            name="Run param optimization (6h)",
+            replace_existing=True,
+        )
+        logger.info(
+            "Registered job: run_param_optimization (every 6h at 03,09,15,21 UTC)"
+        )
 
     scheduler.add_job(
         check_outcomes,
@@ -175,4 +207,8 @@ def register_jobs() -> None:
     )
     logger.info("Registered job: refresh_news_calendar (twice daily at 00:10/12:10 UTC)")
 
-    logger.info("All {count} jobs registered", count=13)
+    logger.info(
+        "All jobs registered | profile={} light={}",
+        settings.scheduler_profile,
+        light,
+    )

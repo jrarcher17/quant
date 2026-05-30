@@ -62,8 +62,19 @@ PARAM_RANGES: dict[str, dict[str, tuple[float, float, float]]] = {
     },
 }
 
-# Number of parameter combinations to sample per strategy
+# Number of parameter combinations to sample per strategy (standard profile)
 NUM_SAMPLES = 80
+
+
+def _num_samples() -> int:
+    """Fewer samples on light scheduler profile to protect small instances."""
+    try:
+        from app.config import get_settings
+        if get_settings().scheduler_profile.strip().lower() == "light":
+            return 24
+    except Exception:
+        pass
+    return NUM_SAMPLES
 
 # Minimum trades required for a combination to be considered
 MIN_TRADES_OPTIMIZE = 10
@@ -389,7 +400,7 @@ class ParamOptimizer:
 
         param_names = list(ranges.keys())
         n_params = len(param_names)
-        n_samples = NUM_SAMPLES - 1  # one slot used by defaults
+        n_samples = _num_samples() - 1  # one slot used by defaults
 
         if n_samples <= 0 or n_params == 0:
             return candidates

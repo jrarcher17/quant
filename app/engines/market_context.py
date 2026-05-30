@@ -87,16 +87,32 @@ async def _load_candles(
     return candles_to_dataframe(rows)
 
 
+# Dashboard polls /dashboard/regime every 30s — cache avoids reloading
+# 800+ candles and recomputing engines on every request.
+_CONTEXT_CACHE: tuple[datetime, MarketContext] | None = None
+_CONTEXT_CACHE_TTL_SEC = 60
+
+
 async def build_market_context(
     session: AsyncSession,
     *,
     now: datetime | None = None,
+    use_cache: bool = True,
 ) -> MarketContext:
     """Construct a fresh MarketContext from the database.
 
     Loads H1/H4/D1 candles, runs all engines, and returns a single immutable
     object describing the current market state.
     """
+    global _CONTEXT_CACHE
+
+    ts = now or datetime.now(tz=__import__("datetime").timezone.utc)
+    if use_cache and _CONTEXT_CACHE is not None:
+        cached_at, cached_ctx = _CONTEXT_CACHE
+        age = (ts - cached_at).total_seconds()
+        if age < _CONTEXT_CACHE_TTL_SEC:
+            return cached_ctx
+
     from app.engines.regime_engine import RegimeEngine
     from app.engines.htf_bias_engine import HTFBiasEngine
     from app.engines.liquidity_engine import LiquidityEngine
@@ -111,7 +127,6 @@ async def build_market_context(
 
     settings = get_settings()
     symbol = settings.trading_symbol
-    ts = now or datetime.now(tz=__import__("datetime").timezone.utc)
 
     h1 = await _load_candles(session, symbol, "H1", 400)
     h4 = await _load_candles(session, symbol, "H4", 200)
@@ -182,5 +197,8 @@ async def build_market_context(
         adx_val,
         atr_pct,
     )
+
+    if use_cache:
+        _CONTEXT_CACHE = (ts, ctx)
 
     return ctx

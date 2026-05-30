@@ -5,6 +5,7 @@ using upsert (ON CONFLICT DO UPDATE) for deduplication, supports incremental
 fetching from the latest stored timestamp, and detects gaps in the time series.
 """
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -135,7 +136,9 @@ class CandleIngestor:
         # Convert internal symbol format to Twelve Data format
         api_symbol = to_twelve_data_symbol(symbol)
 
-        raw = self._fetch_from_api(api_symbol, interval, outputsize, start_date)
+        raw = await asyncio.to_thread(
+            self._fetch_from_api, api_symbol, interval, outputsize, start_date
+        )
 
         if not raw:
             logger.warning(

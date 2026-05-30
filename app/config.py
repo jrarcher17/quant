@@ -28,6 +28,9 @@ class Settings(BaseSettings):
 
     # Scheduling
     candle_refresh_delay_seconds: int = 60
+    # "standard" = full backtests/optimization schedule (needs 2+ vCPU).
+    # "light" = daily heavy jobs only — use on small App Platform instances.
+    scheduler_profile: str = "light"
 
     # Trading
     # Prop firm account balance in USD (sourced from ACCOUNT_BALANCE env var)

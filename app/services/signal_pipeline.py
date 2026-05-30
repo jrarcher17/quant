@@ -100,7 +100,7 @@ class SignalPipeline:
             logger.exception("Pipeline: expire_stale_signals failed (non-fatal)")
 
         # 1. Build context
-        ctx = await build_market_context(session)
+        ctx = await build_market_context(session, use_cache=False)
 
         # 2. Hard blocks — log a single decision so the dashboard explains why
         if ctx.session.blocked:

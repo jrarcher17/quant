@@ -23,6 +23,7 @@ from app.models.news_event import NewsEvent
 
 
 _FEED_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
+# Optional second feed — often 404 on ForexFactory's CDN; thisweek alone is enough.
 _NEXT_WEEK_URL = "https://nfs.faireconomy.media/ff_calendar_nextweek.xml"
 _TIMEOUT = 20.0
 
@@ -54,7 +55,22 @@ def _parse_eastern_time(date_str: str, time_str: str) -> datetime | None:
 async def _fetch_feed(url: str) -> list[dict]:
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         resp = await client.get(url, headers={"User-Agent": "ApexQ/1.0"})
-        resp.raise_for_status()
+        if resp.status_code == 404:
+            logger.warning(
+                "NewsCalendar: feed not found (404) — skipping {}",
+                url,
+            )
+            return []
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "NewsCalendar: HTTP {} for {} — {}",
+                resp.status_code,
+                url,
+                exc,
+            )
+            return []
         body = resp.text
 
     events: list[dict] = []
@@ -101,10 +117,13 @@ async def refresh_news_calendar(session: AsyncSession) -> int:
     for url in (_FEED_URL, _NEXT_WEEK_URL):
         try:
             evs = await _fetch_feed(url)
-            logger.info("NewsCalendar: fetched {} events from {}", len(evs), url)
+            if evs:
+                logger.info("NewsCalendar: fetched {} events from {}", len(evs), url)
             all_events.extend(evs)
+        except httpx.HTTPError as exc:
+            logger.warning("NewsCalendar: network error for {}: {}", url, exc)
         except Exception:
-            logger.exception("NewsCalendar: feed fetch failed for {}", url)
+            logger.exception("NewsCalendar: unexpected error for {}", url)
 
     if not all_events:
         return 0
